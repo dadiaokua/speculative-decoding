@@ -165,3 +165,6 @@ archive/
 logs/
 
 .python-version
+# Large dataset files
+sharegpt_gpt4/*.jsonl
+sharegpt_gpt4/sharegpt_*.jsonl
