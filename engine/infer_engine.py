@@ -1,18 +1,17 @@
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from termcolor import colored
 import time
 import torch
 
 from .batch_decode import decode_batch_with_chat_template
+from .metrics import BatchMetrics, RequestMetrics
 
 
-def infer_batch(ctx, prompts: List[str]):
-    """Run batch inference given raw prompts using the ctx (InferenceCLI) object.
+def infer_batch(ctx, prompts: List[str]) -> Tuple[Optional[BatchMetrics], Optional[BatchMetrics]]:
+    """Run batch inference given raw prompts using the ctx object.
 
-    This function is a thin coordinator that:
-    - formats + tokenizes a batch
-    - resets ngram if requested
-    - dispatches to speculative and/or target AR batch runners implemented on ctx
+    Returns:
+        Tuple of (speculative_metrics, target_metrics) - one may be None if disabled
     """
     if ctx.chat:
         formatted_prompts = [
@@ -32,25 +31,71 @@ def infer_batch(ctx, prompts: List[str]):
         ctx.ngram.reset()
 
     batch_size = len(prompts)
+    spec_metrics = None
+    target_metrics = None
 
     if ctx.spec:
         print(colored("🚀 Running Speculative Decoding on batch...", "green"))
-        run_batch_speculative(ctx, input_ids, attention_mask, batch_size)
+        spec_metrics = run_batch_speculative(ctx, input_ids, attention_mask, batch_size)
 
     if ctx.target_gen:
         print(colored("🎯 Running Target AR on batch...", "blue"))
-        run_batch_target(ctx, input_ids, attention_mask, batch_size)
+        target_metrics = run_batch_target(ctx, input_ids, attention_mask, batch_size)
+
+    return spec_metrics, target_metrics
 
 
-def run_batch_speculative(ctx, input_ids: torch.Tensor, attention_mask: torch.Tensor, batch_size: int):
-    """Run speculative decoding on batch - engine function."""
+def run_batch_speculative(ctx, input_ids: torch.Tensor, attention_mask: torch.Tensor, batch_size: int) -> Optional[BatchMetrics]:
+    """Run speculative decoding on batch - engine function with metrics collection."""
+    batch_metrics = BatchMetrics(batch_size=batch_size)
+    batch_metrics.batch_start_time = time.time()
+    
+    # Track per-request start times for TTFT calculation
+    request_start_times = [time.time()] * batch_size
+    first_token_times = [None] * batch_size
+    
+    def set_first_token_time(idx):
+        if idx < batch_size and first_token_times[idx] is None:
+            first_token_times[idx] = time.time()
+    
     try:
-        _ = batch_speculative_generate(ctx, input_ids, attention_mask, batch_size)
+        batch_outputs, batch_accept_rates = batch_speculative_generate(
+            ctx, input_ids, attention_mask, batch_size, 
+            first_token_callback=set_first_token_time
+        )
+        
+        batch_metrics.batch_end_time = time.time()
+        
+        # Collect metrics for each request
+        for i in range(batch_size):
+            req_metrics = RequestMetrics()
+            req_metrics.start_time = request_start_times[i]
+            req_metrics.prompt_tokens = torch.sum(attention_mask[i]).item()
+            req_metrics.generated_tokens = len(batch_outputs[i]) - req_metrics.prompt_tokens
+            req_metrics.total_tokens = len(batch_outputs[i])
+            req_metrics.acceptance_rate = batch_accept_rates[i] if i < len(batch_accept_rates) else 0.0
+            req_metrics.end_time = batch_metrics.batch_end_time
+            
+            # Calculate TTFT and latency
+            if first_token_times[i] is not None:
+                req_metrics.first_token_time = first_token_times[i]
+                req_metrics.ttft = first_token_times[i] - request_start_times[i]
+            else:
+                # Fallback estimate if first token time not captured
+                req_metrics.ttft = (batch_metrics.batch_end_time - request_start_times[i]) / max(req_metrics.generated_tokens, 1)
+            
+            req_metrics.total_latency = batch_metrics.batch_end_time - request_start_times[i]
+            
+            batch_metrics.requests.append(req_metrics)
+        
+        return batch_metrics
+        
     except Exception as e:
         print(colored(f"❌ Batch speculative decoding failed: {e}", "red"))
+        return None
 
 
-def batch_speculative_generate(ctx, input_ids: torch.Tensor, attention_mask: torch.Tensor, batch_size: int) -> Tuple[List[torch.Tensor], List[float]]:
+def batch_speculative_generate(ctx, input_ids: torch.Tensor, attention_mask: torch.Tensor, batch_size: int, first_token_callback=None) -> Tuple[List[torch.Tensor], List[float]]:
     """True batch speculative generation implementation (engine version).
 
     Uses:
@@ -113,6 +158,11 @@ def batch_speculative_generate(ctx, input_ids: torch.Tensor, attention_mask: tor
                 ).squeeze(1)
                 generated_tokens[active_mask, step + draft_step] = samples_all[active_mask]
                 drafts_generated_per_seq[active_mask] += 1
+                
+                # Record first token time for TTFT calculation
+                if first_token_callback is not None and draft_step == 0 and step == 0:
+                    for idx in torch.where(active_mask)[0]:
+                        first_token_callback(idx.item())
 
         active_mask = ~finished
         if active_mask.any():
@@ -183,14 +233,53 @@ def batch_speculative_generate(ctx, input_ids: torch.Tensor, attention_mask: tor
     return batch_outputs, batch_accept_rates
 
 
-def run_batch_target(ctx, input_ids: torch.Tensor, attention_mask: torch.Tensor, batch_size: int):
+def run_batch_target(ctx, input_ids: torch.Tensor, attention_mask: torch.Tensor, batch_size: int) -> Optional[BatchMetrics]:
+    """Run target AR on batch - engine function with metrics collection."""
+    batch_metrics = BatchMetrics(batch_size=batch_size)
+    batch_metrics.batch_start_time = time.time()
+    
+    # Track per-request start times for TTFT calculation
+    request_start_times = [time.time()] * batch_size
+    first_token_times = [None] * batch_size
+    
+    def set_first_token_time(idx):
+        if idx < batch_size and first_token_times[idx] is None:
+            first_token_times[idx] = time.time()
+    
     try:
-        _ = batch_autoregressive_generate(ctx, input_ids, attention_mask, batch_size)
+        batch_outputs = batch_autoregressive_generate(ctx, input_ids, attention_mask, batch_size, first_token_callback=set_first_token_time)
+        
+        batch_metrics.batch_end_time = time.time()
+        
+        # Collect metrics for each request
+        for i in range(batch_size):
+            req_metrics = RequestMetrics()
+            req_metrics.start_time = request_start_times[i]
+            req_metrics.prompt_tokens = torch.sum(attention_mask[i]).item()
+            req_metrics.generated_tokens = len(batch_outputs[i]) - req_metrics.prompt_tokens
+            req_metrics.total_tokens = len(batch_outputs[i])
+            req_metrics.end_time = batch_metrics.batch_end_time
+            
+            # Calculate TTFT and latency
+            if first_token_times[i] is not None:
+                req_metrics.first_token_time = first_token_times[i]
+                req_metrics.ttft = first_token_times[i] - request_start_times[i]
+            else:
+                # Fallback estimate
+                req_metrics.ttft = (batch_metrics.batch_end_time - request_start_times[i]) / max(req_metrics.generated_tokens, 1)
+            
+            req_metrics.total_latency = batch_metrics.batch_end_time - request_start_times[i]
+            
+            batch_metrics.requests.append(req_metrics)
+        
+        return batch_metrics
+        
     except Exception as e:
         print(colored(f"❌ Batch target generation failed: {e}", "red"))
+        return None
 
 
-def batch_autoregressive_generate(ctx, input_ids: torch.Tensor, attention_mask: torch.Tensor, batch_size: int) -> List[torch.Tensor]:
+def batch_autoregressive_generate(ctx, input_ids: torch.Tensor, attention_mask: torch.Tensor, batch_size: int, first_token_callback=None) -> List[torch.Tensor]:
     device = input_ids.device
     generated_tokens = torch.zeros(batch_size, ctx.gen_len, device=device, dtype=torch.long)
     finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
@@ -262,6 +351,11 @@ def batch_autoregressive_generate(ctx, input_ids: torch.Tensor, attention_mask: 
         for i, active_idx in enumerate(active_indices):
             token = next_tokens[i].item()
             generated_tokens[active_idx, step] = token
+            
+            # Record first token time for TTFT calculation
+            if first_token_callback is not None and step == 0:
+                first_token_callback(active_idx.item())
+            
             if token in ctx.end_tokens:
                 finished[active_idx] = True
 

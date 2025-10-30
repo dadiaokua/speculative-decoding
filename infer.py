@@ -6,7 +6,6 @@ from sampling import autoregressive_generate, speculative_generate
 from ngram_assisted import OneLevelNGramStorage, NGramStorage, ngram_assisted_speculative_generate
 from engine.dataset import load_sharegpt_prompts, load_sharegpt_multi
 from engine.models import load_causal_lm
-from engine.batch_decode import decode_batch_with_chat_template
 from engine.infer_engine import infer_batch
 from utils.logits_processor import GreedyProcessor, MultinomialProcessor, TopKProcessor, NucleusProcessor, TopKNucleusProcessor
 from transformers import (
@@ -60,7 +59,8 @@ class InferenceCLI:
         
         # Auto mode configuration
         self.auto_mode = os.getenv("AUTO_MODE", "false").lower() == "true"
-        self.num_prompts = int(os.getenv("NUM_PROMPTS", "5"))
+        self.auto_rate = float(os.getenv("AUTO_RATE", "1.0"))
+        self.auto_duration = float(os.getenv("AUTO_DURATION", "300"))
         self.prompt_min_length = int(os.getenv("PROMPT_MIN_LENGTH", "10"))
         self.prompt_max_length = int(os.getenv("PROMPT_MAX_LENGTH", "500"))
         self.max_load_lines = int(os.getenv("MAX_LOAD_LINES", "10000"))
@@ -238,104 +238,63 @@ class InferenceCLI:
     def _run_auto_mode(self):
         """Run in automatic mode with random prompts from ShareGPT"""
         print(colored("🤖 Running in AUTO MODE", "magenta", attrs=["bold"]))
-        print(colored(f"Will process {self.num_prompts} random prompts from ShareGPT", "yellow"))
-        
+        print(colored(f"Target rate: {self.auto_rate:.2f} prompts/s", "yellow"))
+        print(colored(f"Duration: {self.auto_duration:.1f} s", "yellow"))
         if self.enable_batch:
-            print(colored(f"📦 Batch processing enabled: {self.batch_size} prompts per batch", "yellow"))
-        
+            print(colored(f"📦 Batch mode: {self.batch_size} prompts per batch", "yellow"))
         print(colored("=" * 60, "magenta"))
-        
+
         if not self.sharegpt_data:
             print(colored("❌ No ShareGPT data available, cannot run auto mode", "red"))
             return
         
-        if self.enable_batch:
-            self._run_batch_inference()
-        else:
-            self._run_sequential_inference()
-        
-        print(colored(f"✅ Completed processing {self.num_prompts} prompts", "green", attrs=["bold"]))
+        if self.auto_duration <= 0:
+            print(colored("⚠️ AUTO_DURATION must be > 0", "yellow"))
+            return
 
-    def _run_sequential_inference(self):
-        """Run inference sequentially (original method)"""
-        for i in range(self.num_prompts):
-            print(colored(f"\n🎲 Prompt {i+1}/{self.num_prompts}:", "magenta", attrs=["bold"]))
-            
-            # Get random prompt
-            random_prompt = self._get_random_prompt()
-            print(colored(f"'{random_prompt}'", "cyan"))
-            print(colored("-" * 60, "magenta"))
-            
-            # Run inference
-            try:
-                self._infer(random_prompt)
-            except Exception as e:
-                print(colored(f"❌ Error during inference: {e}", "red"))
-                continue
-            
-            print(colored("=" * 60, "magenta"))
-            
-            # Small delay between prompts
-            if i < self.num_prompts - 1:
-                time.sleep(1)
+        if self.auto_rate <= 0:
+            print(colored("⚠️ AUTO_RATE must be > 0", "yellow"))
+            return
 
-    def _run_batch_inference(self):
-        """Run inference in batches"""
-        # Collect all prompts first
-        prompts = []
-        for i in range(self.num_prompts):
-            prompt = self._get_random_prompt()
-            prompts.append(prompt)
+        start_time = time.time()
+        end_time = start_time + max(0.0, self.auto_duration)
+        processed = 0
         
-        # Process in batches
-        for batch_start in range(0, len(prompts), self.batch_size):
-            batch_end = min(batch_start + self.batch_size, len(prompts))
-            batch_prompts = prompts[batch_start:batch_end]
+        while True:
+            now = time.time()
+            if now >= end_time:
+                break
+            remaining = end_time - now
+            if remaining <= 0:
+                break
             
-            print(colored(f"\n📦 Processing batch {batch_start//self.batch_size + 1} "
-                         f"(prompts {batch_start+1}-{batch_end}):", "magenta", attrs=["bold"]))
-            
-            for i, prompt in enumerate(batch_prompts):
-                print(colored(f"  {batch_start+i+1}. '{prompt[:100]}{'...' if len(prompt) > 100 else ''}'", "cyan"))
-            
-            print(colored("-" * 60, "magenta"))
-            
-            # Run batch inference
-            try:
-                self._infer_batch(batch_prompts)
-            except Exception as e:
-                print(colored(f"❌ Error during batch inference: {e}", "red"))
-                continue
-            
-            print(colored("=" * 60, "magenta"))
+            if self.enable_batch:
+                prompts = [self._get_random_prompt() for _ in range(self.batch_size)]
+                print(colored(f"\n📦 Batch starting at t={now - start_time:.1f}s", "magenta", attrs=["bold"]))
+                infer_batch(self, prompts)
+                processed += len(prompts)
+            else:
+                prompt = self._get_random_prompt()
+                print(colored(f"\n🎲 Prompt {processed + 1}", "magenta", attrs=["bold"]))
+                print(colored(f"'{prompt}'", "cyan"))
+                print(colored("-" * 60, "magenta"))
+                try:
+                    self._infer(prompt)
+                except Exception as e:
+                    print(colored(f"❌ Error during inference: {e}", "red"))
+                    continue
+                processed += 1
+                print(colored("=" * 60, "magenta"))
 
-    def _infer_batch(self, prompts):
-        """Run inference on a batch of prompts"""
-        batch_size = len(prompts)
+            if self.auto_rate > 0:
+                elapsed = time.time() - start_time
+                expected = processed / self.auto_rate
+                sleep_time = expected - elapsed
+                if sleep_time > 0:
+                    time.sleep(min(sleep_time, max(0.0, end_time - time.time())))
         
-        # Prepare batch inputs
-        if self.chat:
-            formatted_prompts = []
-            for prompt in prompts:
-                formatted = self.tokenizer.apply_chat_template(
-                    [{"role": "user", "content": prompt}], 
-                    add_generation_prompt=True, 
-                    tokenize=False
-                )
-                formatted_prompts.append(formatted)
-        else:
-            formatted_prompts = prompts
-        
-        # Tokenize all prompts
-        input_ids, attention_mask = decode_batch_with_chat_template(
-            self.tokenizer, formatted_prompts, max_length=self.max_batch_length, chat=False
-        )
-        
-        if self.reset_in_between:
-            self.ngram.reset()
-        
-            # Delegate to engine
-            infer_batch(self, prompts)
+        total_elapsed = time.time() - start_time
+        print(colored(f"✅ Auto mode finished: processed {processed} prompts in {total_elapsed:.1f}s", "green", attrs=["bold"]))
 
     def _run_batch_speculative(self, input_ids, attention_mask, batch_size):
         """Run speculative decoding on batch - true batch implementation"""
