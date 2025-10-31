@@ -27,9 +27,13 @@ from termcolor import colored
 class BenchmarkRunner:
     """Performance benchmark runner for Speculative Decoding."""
     
-    def __init__(self):
+    def __init__(self, target_model=None, drafter_model=None):
         """
         Initialize benchmark runner.
+        
+        Args:
+            target_model: Optional path to target model (overrides TARGET_MODEL env var)
+            drafter_model: Optional path to drafter model (overrides DRAFTER_MODEL env var)
         
         Note: GPU allocation is controlled by environment variables (TARGET_GPU, DRAFTER_GPU)
         set in run_benchmark.sh, not by a device parameter. The device parameter is kept
@@ -37,6 +41,10 @@ class BenchmarkRunner:
         """
         print(colored("Speculative Decoding Performance Benchmark", "red", attrs=["bold"]))
         print(colored("=" * 70, "cyan"))
+        
+        # Store command line arguments (if provided)
+        self.target_model_arg = target_model
+        self.drafter_model_arg = drafter_model
         
         # Configuration from environment variables
         self._load_config()
@@ -543,17 +551,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Speculative Decoding Performance Benchmark")
     
     # Model path arguments (can override environment variables)
+    # Use None as default so environment variables are used when not provided
     parser.add_argument(
         "--target-model",
         type=str,
-        default="/home/llm/model_hub/Qwen3-8B",
-        help="Path to target model (overrides TARGET_MODEL env var)"
+        default=None,
+        help="Path to target model (overrides TARGET_MODEL env var, default: use env var or /home/llm/model_hub/Qwen3-8B)"
     )
     parser.add_argument(
         "--drafter-model",
         type=str,
-        default="/home/llm/model_hub/Qwen3-0.6B",
-        help="Path to drafter model (overrides DRAFTER_MODEL env var)"
+        default=None,
+        help="Path to drafter model (overrides DRAFTER_MODEL env var, default: use env var or /home/llm/model_hub/Qwen3-1.7B)"
     )
     
     # Note: GPU allocation is controlled by environment variables (TARGET_GPU, DRAFTER_GPU)
@@ -561,5 +570,9 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    BenchmarkRunner(target_model=args.target_model, drafter_model=args.drafter_model)
+    # Convert empty strings to None (treat as not provided)
+    target_model = args.target_model if args.target_model and args.target_model.strip() else None
+    drafter_model = args.drafter_model if args.drafter_model and args.drafter_model.strip() else None
+    
+    BenchmarkRunner(target_model=target_model, drafter_model=drafter_model)
 
