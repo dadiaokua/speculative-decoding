@@ -27,11 +27,16 @@ from termcolor import colored
 class BenchmarkRunner:
     """Performance benchmark runner for Speculative Decoding."""
     
-    def __init__(self, device: str = "cuda"):
+    def __init__(self):
+        """
+        Initialize benchmark runner.
+        
+        Note: GPU allocation is controlled by environment variables (TARGET_GPU, DRAFTER_GPU)
+        set in run_benchmark.sh, not by a device parameter. The device parameter is kept
+        for compatibility but has no effect.
+        """
         print(colored("Speculative Decoding Performance Benchmark", "red", attrs=["bold"]))
         print(colored("=" * 70, "cyan"))
-        
-        self.device = device
         
         # Configuration from environment variables
         self._load_config()
@@ -52,8 +57,23 @@ class BenchmarkRunner:
         """Load configuration from environment variables."""
         self.gamma = int(os.getenv("GAMMA_VALUE", "4"))
         self.gen_len = int(os.getenv("GENERATION_LENGTH", "100"))
-        self.spec = os.getenv("ENABLE_SPECULATIVE", "true").lower() == "true"
-        self.target_gen = os.getenv("ENABLE_TARGET", "true").lower() == "true"
+        
+        # Inference method: "speculative" or "target_ar" (only one at a time)
+        inference_method = os.getenv("INFERENCE_METHOD", "speculative").lower()
+        if inference_method == "speculative":
+            self.spec = True
+            self.target_gen = False
+            self.inference_method_name = "speculative"
+        elif inference_method == "target_ar":
+            self.spec = False
+            self.target_gen = True
+            self.inference_method_name = "target_ar"
+        else:
+            print(colored(f"⚠️  Warning: Unknown INFERENCE_METHOD '{inference_method}', defaulting to 'speculative'", "yellow"))
+            self.spec = True
+            self.target_gen = False
+            self.inference_method_name = "speculative"
+        
         self.debug = os.getenv("ENABLE_DEBUG", "false").lower() == "true"
         
         # Batch processing
@@ -80,8 +100,14 @@ class BenchmarkRunner:
             os.path.join(self.sharegpt_dir, "sharegpt_zh_38K_format.jsonl"),
         ]
         
-        # Output file
-        self.output_file = os.getenv("OUTPUT_FILE", "benchmark_results.json")
+        # Output file - automatically includes inference method in filename
+        base_output_file = os.getenv("OUTPUT_FILE", "benchmark_results.json")
+        # Generate filename with inference method
+        # e.g., "benchmark_results.json" -> "benchmark_results_speculative.json"
+        if base_output_file.endswith(".json"):
+            self.output_file = base_output_file.replace(".json", f"_{self.inference_method_name}.json")
+        else:
+            self.output_file = f"{base_output_file}_{self.inference_method_name}.json"
         
         # GPU monitoring
         self.enable_gpu_monitor = os.getenv("ENABLE_GPU_MONITOR", "true").lower() == "true"
@@ -92,13 +118,15 @@ class BenchmarkRunner:
     
     def _load_models(self):
         """Load target and drafter models."""
-        target_model = "/home/llm/model_hub/Qwen3-8B"
-        drafter_model = "/home/llm/model_hub/Qwen3-1.7B"
+        # Model paths from environment variables (set in run_benchmark.sh)
+        target_model = os.getenv("TARGET_MODEL", "/home/llm/model_hub/Qwen3-8B")
+        drafter_model = os.getenv("DRAFTER_MODEL", "/home/llm/model_hub/Qwen3-1.7B")
         
         model_dtype = torch.float16
         
         # GPU allocation
         # Reads GPU configuration from environment variables set by run_benchmark.sh
+        # Default "cuda:0" means: if TARGET_GPU/DRAFTER_GPU are not set, both models will use GPU 0
         target_gpu_env = os.getenv("TARGET_GPU", "cuda:0")
         drafter_gpu_env = os.getenv("DRAFTER_GPU", "cuda:0")
         
@@ -169,13 +197,18 @@ class BenchmarkRunner:
         )
         self.drafter.eval()
         
-        # End tokens
-        self.end_tokens = [self.tokenizer.eos_token_id]
+        # End tokens - tokens that signal the end of generation
+        # When any of these tokens are generated, the model will stop generating
+        self.end_tokens = [self.tokenizer.eos_token_id]  # Standard EOS (End Of Sequence) token
+        
+        # Qwen models use a special token "<|im_end|>" to mark the end of assistant responses
+        # We add it to end_tokens so generation stops correctly when using Qwen models
         try:
             qwen_end_token = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
             if qwen_end_token is not None and qwen_end_token != self.tokenizer.unk_token_id:
                 self.end_tokens.append(qwen_end_token)
         except:
+            # If the tokenizer doesn't have this token (non-Qwen model), silently ignore
             pass
         
         print(colored("✅ Models loaded successfully", "green"))
@@ -228,13 +261,13 @@ class BenchmarkRunner:
             print(colored("❌ No ShareGPT data available, cannot run benchmark", "red"))
             return
         
+        # Validate benchmark parameters based on mode
         if self.num_prompts <= 0:
+            # Time-based mode: need valid duration and rate
             if self.auto_duration <= 0 or self.auto_rate <= 0:
-                print(colored("❌ Invalid benchmark parameters", "red"))
+                print(colored("❌ Invalid benchmark parameters: AUTO_DURATION and AUTO_RATE must be > 0 when NUM_PROMPTS=0", "red"))
                 return
-        elif self.num_prompts <= 0:
-            print(colored("❌ Invalid NUM_PROMPTS parameter", "red"))
-            return
+        # else: num_prompts > 0, count-based mode - no additional validation needed
         
         print(colored("\n🚀 Starting Benchmark", "magenta", attrs=["bold"]))
         if self.num_prompts > 0:
@@ -245,18 +278,18 @@ class BenchmarkRunner:
         print(colored(f"  Batch mode: {self.enable_batch}", "yellow"))
         if self.enable_batch:
             print(colored(f"  Batch size: {self.batch_size}", "yellow"))
+        print(colored(f"  Inference Method: {'Speculative Decoding' if self.spec else 'Target AR'}", "yellow"))
         print(colored("=" * 70, "cyan"))
         
-        # Initialize results
-        spec_results = BenchmarkResults(method="speculative") if self.spec else None
-        target_results = BenchmarkResults(method="target_ar") if self.target_gen else None
+        # Initialize results based on selected inference method
+        if self.spec:
+            spec_results = BenchmarkResults(method="speculative")
+            target_results = None
+        else:
+            spec_results = None
+            target_results = BenchmarkResults(method="target_ar")
         
-        if spec_results:
-            spec_results.start_time = time.time()
-        if target_results:
-            target_results.start_time = time.time()
-        
-        # Start GPU monitoring
+        # Start GPU monitoring (before setting start_time to capture accurate timing)
         gpu_monitor = None
         if self.enable_gpu_monitor:
             try:
@@ -267,10 +300,63 @@ class BenchmarkRunner:
                 else:
                     gpu_ids = None  # Monitor all GPUs
                 
-                gpu_monitor = GPUMonitor(gpu_ids=gpu_ids, sampling_interval=self.gpu_monitor_interval)
+                # Performance callback function for GPU monitor
+                def get_performance_metrics():
+                    """Callback to get current performance metrics."""
+                    tokens_gen = 0
+                    tokens_acc = 0
+                    requests_done = 0
+                    throughput_val = 0.0
+                    avg_ttft_val = 0.0
+                    avg_latency_val = 0.0
+                    
+                    # Aggregate from both spec and target results
+                    if spec_results:
+                        tokens_gen += spec_results.total_tokens
+                        requests_done += spec_results.total_requests
+                        if spec_results.avg_ttft > 0:
+                            avg_ttft_val = spec_results.avg_ttft
+                        if spec_results.avg_latency > 0:
+                            avg_latency_val = spec_results.avg_latency
+                        if spec_results.overall_throughput > 0:
+                            throughput_val = spec_results.overall_throughput
+                        # For speculative decoding, count accepted tokens
+                        if spec_results.method == "speculative":
+                            # Estimate accepted tokens from acceptance rate
+                            if spec_results.avg_acceptance_rate > 0:
+                                tokens_acc = int(tokens_gen * spec_results.avg_acceptance_rate)
+                    
+                    if target_results:
+                        tokens_gen += target_results.total_tokens
+                        requests_done += target_results.total_requests
+                        if throughput_val == 0 and target_results.overall_throughput > 0:
+                            throughput_val = target_results.overall_throughput
+                    
+                    return {
+                        'total_tokens_generated': tokens_gen,
+                        'total_tokens_accepted': tokens_acc,
+                        'requests_completed': requests_done,
+                        'throughput': throughput_val,
+                        'avg_ttft': avg_ttft_val,
+                        'avg_latency': avg_latency_val
+                    }
+                
+                gpu_monitor = GPUMonitor(
+                    gpu_ids=gpu_ids, 
+                    sampling_interval=self.gpu_monitor_interval,
+                    performance_callback=get_performance_metrics
+                )
                 gpu_monitor.start()
             except Exception as e:
                 print(colored(f"⚠️  Warning: Could not start GPU monitor: {e}", "yellow"))
+        
+        # Set benchmark start time after GPU monitor is initialized
+        # This ensures accurate timing capture
+        benchmark_start_time = time.time()
+        if spec_results:
+            spec_results.start_time = benchmark_start_time
+        if target_results:
+            target_results.start_time = benchmark_start_time
         
         # Run benchmark
         start_time = time.time()
@@ -375,6 +461,27 @@ class BenchmarkRunner:
             try:
                 gpu_monitor.stop()
                 gpu_monitor_results = gpu_monitor.get_results()
+                
+                # Set final performance metrics
+                total_tokens_gen = 0
+                total_tokens_acc = 0
+                total_reqs = 0
+                
+                if spec_results:
+                    total_tokens_gen += spec_results.total_tokens
+                    total_reqs += spec_results.total_requests
+                    if spec_results.method == "speculative" and spec_results.avg_acceptance_rate > 0:
+                        # Estimate accepted tokens from acceptance rate
+                        total_tokens_acc = int(spec_results.total_tokens * spec_results.avg_acceptance_rate)
+                
+                if target_results:
+                    total_tokens_gen += target_results.total_tokens
+                    total_reqs += target_results.total_requests
+                
+                gpu_monitor_results.total_tokens_generated = total_tokens_gen
+                gpu_monitor_results.total_tokens_accepted = total_tokens_acc
+                gpu_monitor_results.total_requests = total_reqs
+                
             except Exception as e:
                 print(colored(f"⚠️  Warning: Error stopping GPU monitor: {e}", "yellow"))
         
@@ -392,16 +499,11 @@ class BenchmarkRunner:
         print(colored("📊 Benchmark Complete", "cyan", attrs=["bold"]))
         print(colored("=" * 70, "cyan", attrs=["bold"]))
         
+        # Print results summary
         if spec_results:
             print_benchmark_summary(spec_results)
-            spec_results.save_json(self.output_file.replace(".json", "_speculative.json"))
-        
         if target_results:
             print_benchmark_summary(target_results)
-            target_results.save_json(self.output_file.replace(".json", "_target.json"))
-        
-        if spec_results and target_results:
-            print_comparison(spec_results, target_results)
         
         # Print GPU monitoring results
         if gpu_monitor_results:
@@ -410,26 +512,30 @@ class BenchmarkRunner:
             if gpu_monitor:
                 gpu_monitor.save_results(gpu_output_file, results=gpu_monitor_results)
         
-        # Save combined results
-        if spec_results or target_results:
-            combined = {}
-            if spec_results:
-                combined["speculative"] = spec_results.to_dict()
-            if target_results:
-                combined["target_ar"] = target_results.to_dict()
-            if gpu_monitor_results:
-                combined["gpu_monitoring"] = gpu_monitor_results.to_dict()
-            
-            import json
+        # Save results (file name already includes inference method)
+        import json
+        combined = {}
+        if spec_results:
+            combined["speculative"] = spec_results.to_dict()
+            spec_results.save_json(self.output_file)
+        if target_results:
+            combined["target_ar"] = target_results.to_dict()
+            target_results.save_json(self.output_file)
+        if gpu_monitor_results:
+            combined["gpu_monitoring"] = gpu_monitor_results.to_dict()
+        
+        # Save combined results file
+        if combined:
             with open(self.output_file, 'w') as f:
                 json.dump(combined, f, indent=2)
-            print(colored(f"✅ Combined results saved to {self.output_file}", "green"))
+            print(colored(f"✅ Results saved to {self.output_file}", "green"))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Speculative Decoding Performance Benchmark")
-    parser.add_argument("--device", type=str, default="cuda", help="Device to use for inference")
+    # Note: GPU allocation is controlled by environment variables (TARGET_GPU, DRAFTER_GPU)
+    # set in run_benchmark.sh, not by command line arguments
     args = parser.parse_args()
     
-    BenchmarkRunner(device=args.device)
+    BenchmarkRunner()
 

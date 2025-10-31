@@ -29,6 +29,14 @@ class GPUSnapshot:
     temperature: float  # Celsius
     clock_graphics: int  # MHz
     clock_memory: int  # MHz
+    
+    # Performance metrics (optional, set by benchmark)
+    total_tokens_generated: int = 0  # Total tokens generated so far
+    total_tokens_accepted: int = 0   # Total tokens accepted (for speculative decoding)
+    requests_completed: int = 0      # Number of requests completed so far
+    throughput: float = 0.0           # Current throughput (tokens/s)
+    avg_ttft: float = 0.0            # Average TTFT so far
+    avg_latency: float = 0.0         # Average latency so far
 
 
 @dataclass
@@ -38,6 +46,11 @@ class GPUMonitorResults:
     snapshots: List[GPUSnapshot] = field(default_factory=list)
     start_time: float = 0.0
     end_time: float = 0.0
+    
+    # Final performance metrics (set at end of benchmark)
+    total_tokens_generated: int = 0
+    total_tokens_accepted: int = 0  # For speculative decoding
+    total_requests: int = 0
     
     @property
     def duration(self) -> float:
@@ -136,6 +149,46 @@ class GPUMonitorResults:
             temp[snapshot.gpu_id] = max(temp[snapshot.gpu_id], snapshot.temperature)
         return dict(temp)
     
+    @property
+    def total_energy_all_gpus(self) -> float:
+        """Total energy consumed across all GPUs in Joules."""
+        return sum(self.total_energy_consumed.values())
+    
+    @property
+    def tokens_per_joule(self) -> float:
+        """Tokens generated per Joule of energy consumed."""
+        if self.total_energy_all_gpus <= 0:
+            return 0.0
+        return self.total_tokens_generated / self.total_energy_all_gpus
+    
+    @property
+    def tokens_accepted_per_joule(self) -> float:
+        """Accepted tokens per Joule of energy consumed (for speculative decoding)."""
+        if self.total_energy_all_gpus <= 0:
+            return 0.0
+        if self.total_tokens_accepted > 0:
+            return self.total_tokens_accepted / self.total_energy_all_gpus
+        # Fallback to generated tokens if accepted not available
+        return self.total_tokens_generated / self.total_energy_all_gpus
+    
+    @property
+    def tokens_per_kwh(self) -> float:
+        """Tokens generated per kWh of energy consumed."""
+        energy_kwh = self.total_energy_all_gpus / 3600000  # Convert Joules to kWh
+        if energy_kwh <= 0:
+            return 0.0
+        return self.total_tokens_generated / energy_kwh
+    
+    @property
+    def tokens_accepted_per_kwh(self) -> float:
+        """Accepted tokens per kWh of energy consumed (for speculative decoding)."""
+        energy_kwh = self.total_energy_all_gpus / 3600000  # Convert Joules to kWh
+        if energy_kwh <= 0:
+            return 0.0
+        if self.total_tokens_accepted > 0:
+            return self.total_tokens_accepted / energy_kwh
+        return self.total_tokens_generated / energy_kwh
+    
     def to_dict(self) -> Dict:
         """Convert to dictionary for JSON serialization."""
         return {
@@ -144,11 +197,19 @@ class GPUMonitorResults:
             "start_time": self.start_time,
             "end_time": self.end_time,
             "total_energy_consumed": {str(k): v for k, v in self.total_energy_consumed.items()},
+            "total_energy_all_gpus": self.total_energy_all_gpus,
             "average_power": {str(k): v for k, v in self.average_power.items()},
             "peak_power": {str(k): v for k, v in self.peak_power.items()},
             "average_utilization": {str(k): v for k, v in self.average_utilization.items()},
             "average_memory_usage": {str(k): v for k, v in self.average_memory_usage.items()},
             "peak_temperature": {str(k): v for k, v in self.peak_temperature.items()},
+            "total_tokens_generated": self.total_tokens_generated,
+            "total_tokens_accepted": self.total_tokens_accepted,
+            "total_requests": self.total_requests,
+            "tokens_per_joule": self.tokens_per_joule,
+            "tokens_accepted_per_joule": self.tokens_accepted_per_joule,
+            "tokens_per_kwh": self.tokens_per_kwh,
+            "tokens_accepted_per_kwh": self.tokens_accepted_per_kwh,
             "snapshots": [asdict(s) for s in self.snapshots]
         }
 
@@ -156,16 +217,27 @@ class GPUMonitorResults:
 class GPUMonitor:
     """Monitors GPU power and performance metrics."""
     
-    def __init__(self, gpu_ids: Optional[List[int]] = None, sampling_interval: float = 1.0):
+    def __init__(self, gpu_ids: Optional[List[int]] = None, sampling_interval: float = 10.0, 
+                 performance_callback: Optional[callable] = None):
         """
         Initialize GPU monitor.
         
         Args:
             gpu_ids: List of GPU IDs to monitor. If None, monitors all available GPUs.
-            sampling_interval: Sampling interval in seconds.
+            sampling_interval: Sampling interval in seconds (default: 10.0).
+            performance_callback: Optional callback function that returns performance metrics dict:
+                {
+                    'total_tokens_generated': int,
+                    'total_tokens_accepted': int,
+                    'requests_completed': int,
+                    'throughput': float,
+                    'avg_ttft': float,
+                    'avg_latency': float
+                }
         """
         self.gpu_ids = gpu_ids if gpu_ids is not None else self._detect_gpu_ids()
         self.sampling_interval = sampling_interval
+        self.performance_callback = performance_callback
         self.results = GPUMonitorResults(gpu_ids=self.gpu_ids)
         self._monitoring = False
         self._monitor_thread = None
@@ -233,9 +305,26 @@ class GPUMonitor:
         """Main monitoring loop running in background thread."""
         while self._monitoring:
             snapshot_time = time.time()
+            
+            # Get performance metrics if callback is available
+            perf_metrics = {}
+            if self.performance_callback:
+                try:
+                    perf_metrics = self.performance_callback() or {}
+                except Exception as e:
+                    print(colored(f"⚠️  Warning: Performance callback error: {e}", "yellow"))
+            
             for gpu_id in self.gpu_ids:
                 snapshot = self._query_gpu_metrics(gpu_id)
                 if snapshot:
+                    # Add performance metrics to snapshot
+                    snapshot.total_tokens_generated = perf_metrics.get('total_tokens_generated', 0)
+                    snapshot.total_tokens_accepted = perf_metrics.get('total_tokens_accepted', 0)
+                    snapshot.requests_completed = perf_metrics.get('requests_completed', 0)
+                    snapshot.throughput = perf_metrics.get('throughput', 0.0)
+                    snapshot.avg_ttft = perf_metrics.get('avg_ttft', 0.0)
+                    snapshot.avg_latency = perf_metrics.get('avg_latency', 0.0)
+                    
                     self.results.snapshots.append(snapshot)
             
             # Sleep until next sampling interval
@@ -309,7 +398,9 @@ def print_gpu_summary(results: GPUMonitorResults):
     
     print(f"\n  Total (All GPUs):")
     print(f"    Average Power:     {total_avg_power:.2f} W")
-    print(f"    Total Energy:      {total_energy/3600:.2f} Wh ({total_energy:.2f} J)")
+    energy_wh_total = total_energy / 3600
+    energy_kwh_total = energy_wh_total / 1000
+    print(f"    Total Energy:      {energy_wh_total:.2f} Wh ({energy_kwh_total:.4f} kWh)")
     
     print(colored("\n📈 Utilization:", "yellow", attrs=["bold"]))
     for gpu_id in results.gpu_ids:
@@ -323,6 +414,20 @@ def print_gpu_summary(results: GPUMonitorResults):
     for gpu_id in results.gpu_ids:
         temp = results.peak_temperature.get(gpu_id, 0.0)
         print(f"  GPU {gpu_id}: Peak Temperature: {temp:.1f}°C")
+    
+    if results.total_tokens_generated > 0:
+        print(colored("\n🎯 Performance Metrics:", "yellow", attrs=["bold"]))
+        print(f"  Total Tokens Generated: {results.total_tokens_generated:,}")
+        if results.total_tokens_accepted > 0:
+            print(f"  Total Tokens Accepted:   {results.total_tokens_accepted:,}")
+        print(f"  Total Requests:         {results.total_requests}")
+        
+        print(colored("\n⚡ Energy Efficiency:", "yellow", attrs=["bold"]))
+        print(f"  Tokens per Joule:       {results.tokens_per_joule:.2f} tokens/J")
+        print(f"  Tokens per kWh:         {results.tokens_per_kwh:,.0f} tokens/kWh")
+        if results.total_tokens_accepted > 0:
+            print(f"  Accepted Tokens per Joule: {results.tokens_accepted_per_joule:.2f} tokens/J")
+            print(f"  Accepted Tokens per kWh:   {results.tokens_accepted_per_kwh:,.0f} tokens/kWh")
     
     print(colored(f"\n⏱️  Monitoring Duration: {results.duration:.2f} s", "yellow", attrs=["bold"]))
     print(colored("=" * 70, "cyan", attrs=["bold"]))

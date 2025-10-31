@@ -102,6 +102,14 @@ case $GPU_STRATEGY in
 esac
 
 # =============================================================================
+# Model Configuration
+# =============================================================================
+
+# Model paths (local paths or Hugging Face model IDs)
+export TARGET_MODEL="/home/llm/model_hub/Qwen3-8B"      # Target model path
+export DRAFTER_MODEL="/home/llm/model_hub/Qwen3-1.7B"  # Drafter model path
+
+# =============================================================================
 # Dataset Configuration
 # =============================================================================
 
@@ -122,7 +130,7 @@ export AUTO_RATE=1.0                     # Requests per second (when using durat
 export AUTO_DURATION=300                 # Duration in seconds (when NUM_PROMPTS=0)
 
 # Batch processing
-export ENABLE_BATCH="true"               # Enable batch processing
+export ENABLE_BATCH="false"               # Enable batch processing
 export BATCH_SIZE=4                      # Batch size
 export MAX_BATCH_LENGTH=512               # Max sequence length in batch
 
@@ -131,15 +139,17 @@ export GENERATION_LENGTH=100             # Generation length in tokens
 export GAMMA_VALUE=4                     # Gamma parameter for speculative decoding
 
 # Feature flags
-export ENABLE_SPECULATIVE="true"         # Enable speculative decoding
-export ENABLE_TARGET="true"              # Enable target AR generation (for comparison)
+# Inference method: "speculative" (use speculative decoding) or "target_ar" (use standard AR)
+export INFERENCE_METHOD="speculative"    # Options: "speculative", "target_ar"
 export ENABLE_DEBUG="false"              # Enable debug output
 
 # GPU monitoring
 export ENABLE_GPU_MONITOR="true"         # Enable GPU power/performance monitoring
-export GPU_MONITOR_INTERVAL=1.0          # GPU monitoring sampling interval (seconds)
+export GPU_MONITOR_INTERVAL=10.0         # GPU monitoring sampling interval (seconds, ~10s recommended)
 
 # Output configuration
+# Output filename will automatically include inference method suffix
+# e.g., "benchmark_results.json" -> "benchmark_results_speculative.json" or "benchmark_results_target_ar.json"
 export OUTPUT_FILE="benchmark_results.json"
 
 # =============================================================================
@@ -159,6 +169,9 @@ echo "  Available GPUs: $CUDA_VISIBLE_DEVICES"
 echo "  Target GPU: $TARGET_GPU"
 echo "  Drafter GPU: $DRAFTER_GPU"
 echo ""
+echo "  Target Model: $TARGET_MODEL"
+echo "  Drafter Model: $DRAFTER_MODEL"
+echo ""
 echo "  Dataset: $SHAREGPT_DIR"
 if [ "$NUM_PROMPTS" -gt 0 ]; then
     echo "  Benchmark Mode: Fixed count"
@@ -177,8 +190,7 @@ fi
 echo ""
 echo "  Generation Length: $GENERATION_LENGTH tokens"
 echo "  Gamma: $GAMMA_VALUE"
-echo "  Speculative Decoding: $ENABLE_SPECULATIVE"
-echo "  Target AR: $ENABLE_TARGET"
+echo "  Inference Method: $INFERENCE_METHOD"
 echo ""
 echo "  GPU Monitoring: $ENABLE_GPU_MONITOR"
 if [ "$ENABLE_GPU_MONITOR" = "true" ]; then
@@ -193,7 +205,8 @@ echo ""
 # =============================================================================
 
 print_success "Starting benchmark..."
-python benchmark.py --device cuda:0
+# Note: GPU allocation is controlled by TARGET_GPU and DRAFTER_GPU environment variables above
+python benchmark.py
 
 print_success "Benchmark completed! Results saved to $OUTPUT_FILE"
 

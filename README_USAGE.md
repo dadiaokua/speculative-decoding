@@ -1,209 +1,189 @@
-# 启动脚本使用说明
+# Benchmark 使用说明
 
-## 📁 脚本文件说明
+## 📋 概述
 
-### 1. `run_speculative.sh` - 完整功能脚本
-包含所有配置选项和环境检查的完整启动脚本。
+本项目现在专注于**性能测试**，提供了完整的自动化benchmark功能，用于比较Speculative Decoding和标准自回归生成的性能。
 
-**特性:**
-- 🔍 自动环境检查
-- 🎛️ 丰富的配置选项
-- 🔧 命令行参数支持
-- 📊 配置摘要显示
-- 🎯 交互式确认
+## 🚀 快速开始
 
-### 2. `run_simple.sh` - 简化启动脚本
-快速启动的简化版本。
+### 1. 配置GPU分配
 
-**特性:**
-- 🚀 一键启动
-- 📋 基础配置显示
-- 💡 常用命令提示
+编辑 `run_benchmark.sh` 配置GPU分配：
 
-### 3. `configs/multi_gpu_config.sh` - 多GPU专用配置
-针对多GPU部署优化的启动脚本。
-
-**特性:**
-- 🔧 5卡配置 (4+1)
-- 📊 GPU状态检查
-- 🎯 流水线并行说明
-
-### 4. `configs/performance_config.sh` - 性能优化配置
-性能调优的启动配置。
-
-**特性:**
-- ⚡ 性能优化设置
-- 📈 推荐参数
-- 💡 监控命令
-
-## 🚀 使用方法
-
-### 基础使用
 ```bash
-# 给脚本添加执行权限
-chmod +x run_simple.sh
-chmod +x run_speculative.sh
-chmod +x configs/*.sh
+# 设置可用GPU
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
-# 快速启动
-./run_simple.sh
+# 选择GPU分配策略
+GPU_STRATEGY="multi_gpu_ratio"  # 选项: multi_gpu_ratio, separate, same, auto
 
-# 完整功能启动
-./run_speculative.sh
+# GPU比例配置（multi_gpu_ratio策略）
+TARGET_GPU_RATIO=6    # Target模型使用6张GPU
+DRAFTER_GPU_RATIO=2    # Drafter模型使用2张GPU
 ```
 
-### 多GPU部署
-```bash
-# 多GPU配置启动
-./configs/multi_gpu_config.sh
+### 2. 配置Benchmark参数
 
-# 或者使用完整脚本的多GPU模式
-./run_speculative.sh --device-mode multi_gpu
+编辑 `run_benchmark.sh` 设置测试参数：
+
+```bash
+# Benchmark模式（二选一）:
+# 选项1: 固定prompt数量
+export NUM_PROMPTS=100
+
+# 选项2: 基于时间（时长 + 速率）
+export AUTO_RATE=1.0              # 每秒请求数
+export AUTO_DURATION=300          # 运行时长（秒）
+
+# Batch处理
+export ENABLE_BATCH="true"        # 启用batch处理
+export BATCH_SIZE=4               # Batch大小
+export MAX_BATCH_LENGTH=512      # 最大序列长度
+
+# 生成参数
+export GENERATION_LENGTH=100     # 生成长度（tokens）
+export GAMMA_VALUE=4             # Gamma参数
+
+# 功能开关
+export ENABLE_SPECULATIVE="true" # 启用speculative decoding
+export ENABLE_TARGET="true"      # 启用target AR（用于对比）
+export ENABLE_GPU_MONITOR="true" # 启用GPU能耗监控
 ```
 
-### 性能优化启动
-```bash
-# 性能优化配置
-./configs/performance_config.sh
+### 3. 运行Benchmark
 
-# 或者使用完整脚本的自定义参数
-./run_speculative.sh --gamma 6 --temperature 0.9 --debug
+```bash
+chmod +x run_benchmark.sh
+./run_benchmark.sh
 ```
 
-### 命令行参数 (完整脚本)
-```bash
-# 查看帮助
-./run_speculative.sh --help
+## 📊 输出结果
 
-# 自定义配置
-./run_speculative.sh --device-mode single --gamma 4 --length 100
-./run_speculative.sh --device-mode multi_gpu --temperature 0.8
-./run_speculative.sh --processor nucleus --no-speculative --debug
+Benchmark完成后会生成以下文件：
+
+- `benchmark_results.json` - 完整结果（speculative + target + GPU指标）
+- `benchmark_results_speculative.json` - Speculative decoding结果
+- `benchmark_results_target.json` - Target AR结果
+- `benchmark_results_gpu.json` - GPU监控结果
+
+控制台会显示格式化的性能摘要。
+
+## 🎯 GPU分配策略
+
+### multi_gpu_ratio（推荐）
+
+按比例分配多张GPU：
+
+```bash
+GPU_STRATEGY="multi_gpu_ratio"
+TARGET_GPU_RATIO=6
+DRAFTER_GPU_RATIO=2
 ```
 
-## ⚙️ 配置修改
+**效果**:
+- Target模型（8B）: GPU 0-5（层自动分配到6张GPU）
+- Drafter模型（1.7B）: GPU 6-7（层自动分配到2张GPU）
 
-### 修改模型配置
-编辑脚本中的以下变量：
+### separate
+
+分离部署：
+
 ```bash
-TARGET_MODEL="meta-llama/Llama-3.2-3B-Instruct"
-DRAFTER_MODEL="meta-llama/Llama-3.2-1B-Instruct"
+GPU_STRATEGY="separate"
 ```
 
-### 修改GPU配置
-```bash
-# 单GPU
-SINGLE_DEVICE="cuda:0"
+**效果**:
+- Target模型 → GPU 0
+- Drafter模型 → GPU 1
 
-# 多GPU
-MULTI_GPU_DEVICES="0,1,2,3,4"
+### same
+
+共享GPU：
+
+```bash
+GPU_STRATEGY="same"
 ```
 
-### 修改生成参数
+**效果**:
+- Target模型和Drafter模型共享GPU 0
+
+### auto
+
+自动分配：
+
 ```bash
-GAMMA=4                    # Speculative decoding的gamma值
-GENERATION_LENGTH=50       # 生成长度
-TEMPERATURE=0.8           # 温度参数
-TOP_P=0.9                 # Nucleus采样的top-p
+GPU_STRATEGY="auto"
 ```
 
-## 🎯 运行时配置
+**效果**: 让transformers自动决定GPU分配
 
-启动后，可以使用以下交互命令：
+详细说明请参考：[GPU部署指南](docs/GPU_DEPLOYMENT_CN.md)
 
-### 基础控制
-```bash
-/help                     # 显示所有命令
-/quit                     # 退出程序
-/clear                    # 清屏
+## 📈 性能指标
+
+Benchmark会收集以下指标：
+
+### 推理指标
+- **TTFT (Time To First Token)** - 首token延迟
+- **端到端延迟** - 每个请求的总生成时间
+- **吞吐量** - 每秒token数
+- **Token数量** - Prompt tokens、生成tokens、总tokens
+- **接受率** - 草稿接受率（speculative decoding）
+
+### GPU指标
+- **能耗** - 平均、峰值、总能耗
+- **GPU利用率** - 平均GPU利用率百分比
+- **内存使用** - 平均内存使用百分比
+- **温度** - 峰值GPU温度
+
+## 🔧 高级配置
+
+### 自定义模型路径
+
+编辑 `benchmark.py` 修改模型路径：
+
+```python
+target_model = "/path/to/target/model"
+drafter_model = "/path/to/drafter/model"
 ```
 
-### 参数调整
+### 数据集配置
+
+配置ShareGPT数据集目录：
+
 ```bash
-/gamma 6                  # 设置gamma值
-/length 100               # 设置生成长度
-/processor nucleus 0.8 0.9 # 设置采样器
+export SHAREGPT_DIR="/path/to/sharegpt/directory"
 ```
 
-### 功能开关
+Benchmark会从以下文件加载prompts：
+- `sharegpt_gpt4.jsonl`
+- `sharegpt_V3_format.jsonl`
+- `sharegpt_zh_38K_format.jsonl`
+
+### 采样间隔配置
+
 ```bash
-/speculative              # 切换speculative decoding
-/target                   # 切换target模型生成
-/drafter                  # 切换drafter独立生成
-/ngram                    # 切换n-gram辅助
-/debug                    # 切换调试模式
-/cache                    # 切换缓存功能
+export GPU_MONITOR_INTERVAL=1.0  # GPU监控采样间隔（秒）
 ```
 
-## 🔧 故障排除
+## 🐛 故障排除
 
-### 常见问题
+### GPU内存不足
+- 减少 `BATCH_SIZE` 或 `MAX_BATCH_LENGTH`
+- 减少 `GAMMA_VALUE`
+- 为target模型分配更多GPU
 
-1. **GPU内存不足**
-   ```bash
-   # 减少gamma值或启用量化
-   /gamma 2
-   # 检查GPU内存使用
-   nvidia-smi
-   ```
+### 模型加载失败
+- 检查 `benchmark.py` 中的模型路径
+- 确保模型兼容（相同tokenizer，相同logit形状）
+- 使用 `nvidia-smi` 验证GPU可用性
 
-2. **模型加载失败**
-   ```bash
-   # 检查网络连接和HuggingFace访问
-   # 或使用本地模型路径
-   ```
+### Benchmark问题
+- 检查ShareGPT数据集目录路径
+- 验证环境变量设置正确
+- 检查GPU分配是否匹配可用GPU
 
-3. **性能较差**
-   ```bash
-   # 调整gamma值找到最优acceptance rate
-   /gamma 4
-   /gamma 6
-   # 启用缓存
-   /cache
-   ```
+## 📚 相关文档
 
-### 环境检查
-```bash
-# 检查CUDA
-nvidia-smi
-
-# 检查Python环境
-python --version
-pip list | grep torch
-
-# 检查项目文件
-ls -la /Users/myrick/GithubProjects/Speculative-Decoding/
-```
-
-## 📊 性能监控
-
-### GPU监控
-```bash
-# 实时GPU使用率
-nvidia-smi -l 1
-
-# GPU内存使用详情
-nvidia-smi --query-gpu=memory.used,memory.free,utilization.gpu --format=csv -l 1
-```
-
-### 系统监控
-```bash
-# CPU和内存使用
-htop
-
-# 进程监控
-ps aux | grep python
-```
-
-## 💡 最佳实践
-
-1. **首次运行**: 使用 `run_simple.sh` 快速测试
-2. **生产环境**: 使用 `run_speculative.sh` 完整配置
-3. **多GPU部署**: 使用 `configs/multi_gpu_config.sh`
-4. **性能调优**: 使用 `configs/performance_config.sh`
-
-5. **参数调优顺序**:
-   - 先确保模型正常加载
-   - 调整gamma值优化acceptance rate
-   - 调整采样参数优化生成质量
-   - 启用缓存和其他优化功能
+- [GPU部署详细指南](docs/GPU_DEPLOYMENT_CN.md)
+- [主README](README.md)
