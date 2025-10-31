@@ -121,8 +121,11 @@ class BenchmarkRunner:
         self.enable_gpu_monitor = os.getenv("ENABLE_GPU_MONITOR", "true").lower() == "true"
         self.gpu_monitor_interval = float(os.getenv("GPU_MONITOR_INTERVAL", "1.0"))
         
+        # Inference context attributes (required by infer_batch)
         self.chat = True
         self.cache = False
+        self.reset_in_between = False  # Whether to reset ngram between batches (not used in benchmark)
+        self.ngram = None  # N-gram storage (not used in benchmark, set to None)
     
     def _load_models(self):
         """Load target and drafter models."""
