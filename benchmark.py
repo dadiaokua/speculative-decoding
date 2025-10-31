@@ -259,12 +259,12 @@ class BenchmarkRunner:
     def _load_sharegpt_data(self):
         """Load ShareGPT prompts."""
         try:
+            # load_sharegpt_multi expects a list of full file paths
             parts = load_sharegpt_multi(
-                self.sharegpt_dir,
-                self.sharegpt_file_names,
-                prompt_min_length=self.prompt_min_length,
-                prompt_max_length=self.prompt_max_length,
-                max_load_lines=self.max_load_lines,
+                self.sharegpt_paths,
+                max_lines=self.max_load_lines,
+                min_len=self.prompt_min_length,
+                max_len=self.prompt_max_length,
             )
             self.sharegpt_parts = parts
             flat = []

@@ -107,7 +107,7 @@ esac
 
 # Model paths (local paths or Hugging Face model IDs)
 export TARGET_MODEL="/home/llm/model_hub/Qwen3-8B"      # Target model path
-export DRAFTER_MODEL="/home/llm/model_hub/Qwen3-1.7B"  # Drafter model path
+export DRAFTER_MODEL="/home/llm/model_hub/Qwen3-0.6B"  # Drafter model path
 
 # =============================================================================
 # Dataset Configuration
