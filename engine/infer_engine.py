@@ -232,7 +232,7 @@ def batch_speculative_generate(ctx, input_ids: torch.Tensor, attention_mask: tor
             drafter_past = out.past_key_values  # 更新KV cache
 
             # 从drafter的概率分布中采样一个token
-            samples_all = torch.multinomial(q_probs, 1).squeeze(-1)  # [batch_size]
+            samples_all = torch.multinomial(q_probs, 1).squeeze(-1).to(device)  # [batch_size] - 确保在正确设备上
             q_probs_full[:, draft_step, :] = q_probs  # 保存完整概率分布（用于后续计算）
 
             # 只更新未完成的序列
@@ -255,16 +255,20 @@ def batch_speculative_generate(ctx, input_ids: torch.Tensor, attention_mask: tor
         active_mask = ~finished
         if active_mask.any():
             # 构建完整的序列：prompt + 已生成的token + 本次的gamma个草稿token
-            verify_ids = torch.cat([input_ids, generated_tokens[:, :step + current_gamma]], dim=1)
+            # 确保所有张量在正确的设备上（多GPU环境下很重要）
+            verify_ids = torch.cat([input_ids.to(device), generated_tokens[:, :step + current_gamma].to(device)], dim=1)
             with torch.no_grad():
                 # Target一次性前向传播，验证所有gamma个位置
                 t_out = ctx.target(verify_ids)
                 # 提取gamma个位置的logits（对应gamma个草稿token的位置）
                 t_logits_full = t_out.logits[:, -(current_gamma+1):-1, :]
+                # 确保logits在正确的设备上，然后计算概率
+                t_logits_full = t_logits_full.to(device)
                 p_probs_full = torch.softmax(t_logits_full, dim=-1)  # target的概率分布 p(x)
 
             # ========== 阶段4: 对每个序列逐个进行accept/reject决策 ==========
-            for global_idx in torch.where(active_mask)[0]:
+            active_indices = torch.where(active_mask)[0].to(device)  # 确保索引在正确的设备上
+            for global_idx in active_indices:
                 local_row = global_idx.item()
                 if finished[global_idx]:
                     continue
@@ -278,6 +282,9 @@ def batch_speculative_generate(ctx, input_ids: torch.Tensor, attention_mask: tor
                     sampled_token = draft_tokens[global_idx, draft_idx].item()
                     q_vec = q_probs_full[global_idx, draft_idx]  # drafter在draft_idx位置的概率分布
                     p_vec = p_probs_full[local_row, draft_idx]   # target在draft_idx位置的概率分布
+                    # 确保概率向量在正确的设备上
+                    q_vec = q_vec.to(device)
+                    p_vec = p_vec.to(device)
 
                     # 提取采样token的概率
                     p_sample = p_vec[sampled_token].item()  # target对该token的概率
@@ -300,14 +307,15 @@ def batch_speculative_generate(ctx, input_ids: torch.Tensor, attention_mask: tor
                         # ❌ 拒绝该token，需要从修正后的分布中重新采样
                         # residual分布 = max(0, p_target - p_drafter)
                         # 这确保了即使拒绝后，采样仍遵循target的分布
-                        residual = torch.clamp(p_vec - torch.minimum(p_vec, q_vec), min=0.0)
+                        residual = torch.clamp(p_vec - torch.minimum(p_vec, q_vec), min=0.0).to(device)
                         denom = residual.sum().item()
                         if denom <= 1e-12:
                             # 如果residual分布为空，直接按target分布采样
-                            corrected = torch.multinomial(p_vec, 1).item()
+                            corrected = torch.multinomial(p_vec.to(device), 1).item()
                         else:
                             # 从residual分布中采样（归一化）
-                            corrected = torch.multinomial(residual / denom, 1).item()
+                            # 确保采样结果在正确的设备上
+                            corrected = torch.multinomial((residual / denom).to(device), 1).item()
                         generated_tokens[global_idx, step + draft_idx] = corrected
                         # 检查是否是结束token
                         if corrected in ctx.end_tokens:
@@ -454,9 +462,9 @@ def batch_autoregressive_generate(ctx, input_ids: torch.Tensor, attention_mask: 
         # Greedy by default (ctx.processor may have temperature)
         if hasattr(ctx.processor, 'temperature') and ctx.processor.temperature > 0:
             probs = torch.softmax(logits / ctx.processor.temperature, dim=-1)
-            next_tokens = torch.multinomial(probs, 1).squeeze(-1)
+            next_tokens = torch.multinomial(probs, 1).squeeze(-1).to(device)  # 确保在正确设备上
         else:
-            next_tokens = torch.argmax(logits, dim=-1)
+            next_tokens = torch.argmax(logits, dim=-1).to(device)  # 确保在正确设备上
 
         active_indices = torch.where(active_mask)[0]
         for i, active_idx in enumerate(active_indices):
