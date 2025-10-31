@@ -153,25 +153,18 @@ class BenchmarkRunner:
             Input formats:
             - "auto" -> "auto" (let transformers decide)
             - "cuda:0" -> "cuda:0" (single GPU)
-            - "cuda:0,cuda:1,cuda:2" -> {"": [0,1,2]} (multi-GPU auto-distribute)
+            - "cuda:0,cuda:1,cuda:2" -> "auto" with CUDA_VISIBLE_DEVICES set
             
-            Output formats:
-            - Single GPU: "cuda:0"
-            - Multi-GPU: {"": [0,1,2]} where "" means auto-distribute layers
-            - Auto: "auto"
+            Note: For multi-GPU, we use "auto" mode which works better with newer transformers versions.
+            The actual GPU allocation is controlled by CUDA_VISIBLE_DEVICES environment variable.
             """
             if gpu_string == "auto":
                 return "auto"
             elif "," in gpu_string:
-                # Multi-GPU case: "cuda:0,cuda:1,cuda:2"
-                # Extract GPU IDs and return auto-distribution format
-                gpu_ids = []
-                for gpu in gpu_string.split(","):
-                    if gpu.startswith("cuda:"):
-                        gpu_ids.append(int(gpu.split(":")[1]))
-                # {"": [0,1,2]} tells transformers to auto-distribute model layers
-                # across these GPUs using accelerate library
-                return {"": gpu_ids}
+                # Multi-GPU case: Use "auto" mode
+                # The actual GPU selection is handled by CUDA_VISIBLE_DEVICES
+                # Transformers will automatically distribute layers across visible GPUs
+                return "auto"
             else:
                 # Single GPU case: "cuda:0"
                 return gpu_string
@@ -179,39 +172,73 @@ class BenchmarkRunner:
         target_device_map = parse_device_map(target_gpu_env)
         drafter_device_map = parse_device_map(drafter_gpu_env)
         
+        # For multi-GPU, we need to set CUDA_VISIBLE_DEVICES before loading models
+        # Extract GPU IDs from the environment variable strings
+        def get_gpu_ids(gpu_string):
+            """Extract GPU IDs from string like 'cuda:0,cuda:1,cuda:2' -> [0, 1, 2]"""
+            if "," in gpu_string:
+                gpu_ids = []
+                for gpu in gpu_string.split(","):
+                    if gpu.startswith("cuda:"):
+                        gpu_ids.append(int(gpu.split(":")[1]))
+                return gpu_ids
+            elif gpu_string.startswith("cuda:"):
+                return [int(gpu_string.split(":")[1])]
+            return []
+        
+        target_gpu_ids = get_gpu_ids(target_gpu_env)
+        drafter_gpu_ids = get_gpu_ids(drafter_gpu_env)
+        
         print(colored("Loading models...", "light_grey"))
-        print(colored(f"Target: {target_model} on {target_device_map}", "yellow"))
-        print(colored(f"Drafter: {drafter_model} on {drafter_device_map}", "yellow"))
+        print(colored(f"Target: {target_model} on GPUs {target_gpu_ids} (device_map={target_device_map})", "yellow"))
+        print(colored(f"Drafter: {drafter_model} on GPUs {drafter_gpu_ids} (device_map={drafter_device_map})", "yellow"))
         
-        # Print detailed GPU allocation info
-        if isinstance(target_device_map, dict) and "" in target_device_map:
-            print(colored(f"  → Target model layers will be auto-distributed across GPUs: {target_device_map['']}", "light_grey"))
-        if isinstance(drafter_device_map, dict) and "" in drafter_device_map:
-            print(colored(f"  → Drafter model layers will be auto-distributed across GPUs: {drafter_device_map['']}", "light_grey"))
+        # Set CUDA_VISIBLE_DEVICES for target model
+        original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        if target_gpu_ids:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, target_gpu_ids))
         
-        self.target = AutoModelForCausalLM.from_pretrained(
-            target_model,
-            quantization_config=None,
-            torch_dtype=model_dtype,
-            device_map=target_device_map,
-            attn_implementation="sdpa",
-            trust_remote_code=True,
-        )
-        self.target.eval()
+        try:
+            self.target = AutoModelForCausalLM.from_pretrained(
+                target_model,
+                quantization_config=None,
+                dtype=model_dtype,  # Use dtype instead of torch_dtype (deprecated)
+                device_map=target_device_map,
+                attn_implementation="sdpa",
+                trust_remote_code=True,
+            )
+            self.target.eval()
+        finally:
+            # Restore original CUDA_VISIBLE_DEVICES
+            if original_cuda_visible:
+                os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
+            else:
+                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         
         self.tokenizer = AutoTokenizer.from_pretrained(target_model, trust_remote_code=True)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        self.drafter = AutoModelForCausalLM.from_pretrained(
-            drafter_model,
-            quantization_config=None,
-            torch_dtype=model_dtype,
-            device_map=drafter_device_map,
-            attn_implementation="sdpa",
-            trust_remote_code=True,
-        )
-        self.drafter.eval()
+        # Set CUDA_VISIBLE_DEVICES for drafter model
+        if drafter_gpu_ids:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, drafter_gpu_ids))
+        
+        try:
+            self.drafter = AutoModelForCausalLM.from_pretrained(
+                drafter_model,
+                quantization_config=None,
+                dtype=model_dtype,  # Use dtype instead of torch_dtype (deprecated)
+                device_map=drafter_device_map,
+                attn_implementation="sdpa",
+                trust_remote_code=True,
+            )
+            self.drafter.eval()
+        finally:
+            # Restore original CUDA_VISIBLE_DEVICES
+            if original_cuda_visible:
+                os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
+            else:
+                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         
         # End tokens - tokens that signal the end of generation
         # When any of these tokens are generated, the model will stop generating
