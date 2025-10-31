@@ -197,12 +197,20 @@ runner = BenchmarkRunner(device="cuda:0")
 
 ### Custom Model Paths
 
-Edit `benchmark.py` to change model paths:
+Configure model paths via command line arguments (recommended):
 
-```python
-target_model = "/path/to/target/model"
-drafter_model = "/path/to/drafter/model"
+```bash
+python benchmark.py --target-model /path/to/target/model --drafter-model /path/to/drafter/model
 ```
+
+Or set environment variables in `run_benchmark.sh`:
+
+```bash
+export TARGET_MODEL="/path/to/target/model"
+export DRAFTER_MODEL="/path/to/drafter/model"
+```
+
+Command line arguments override environment variables if both are provided.
 
 ### Dataset Configuration
 

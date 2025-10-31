@@ -206,7 +206,9 @@ echo ""
 
 print_success "Starting benchmark..."
 # Note: GPU allocation is controlled by TARGET_GPU and DRAFTER_GPU environment variables above
-python benchmark.py
+# Model paths can be passed as command line arguments (--target-model, --drafter-model)
+# If not provided, will use TARGET_MODEL and DRAFTER_MODEL environment variables
+python benchmark.py "$@"
 
 print_success "Benchmark completed! Results saved to $OUTPUT_FILE"
 

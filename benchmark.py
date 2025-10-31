@@ -118,9 +118,17 @@ class BenchmarkRunner:
     
     def _load_models(self):
         """Load target and drafter models."""
-        # Model paths from environment variables (set in run_benchmark.sh)
-        target_model = os.getenv("TARGET_MODEL", "/home/llm/model_hub/Qwen3-8B")
-        drafter_model = os.getenv("DRAFTER_MODEL", "/home/llm/model_hub/Qwen3-1.7B")
+        # Model paths: command line args override environment variables
+        target_model = (
+            self.target_model_arg 
+            if self.target_model_arg is not None 
+            else os.getenv("TARGET_MODEL", "/home/llm/model_hub/Qwen3-8B")
+        )
+        drafter_model = (
+            self.drafter_model_arg 
+            if self.drafter_model_arg is not None 
+            else os.getenv("DRAFTER_MODEL", "/home/llm/model_hub/Qwen3-1.7B")
+        )
         
         model_dtype = torch.float16
         
@@ -533,9 +541,25 @@ class BenchmarkRunner:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Speculative Decoding Performance Benchmark")
+    
+    # Model path arguments (can override environment variables)
+    parser.add_argument(
+        "--target-model",
+        type=str,
+        default="/home/llm/model_hub/Qwen3-8B",
+        help="Path to target model (overrides TARGET_MODEL env var)"
+    )
+    parser.add_argument(
+        "--drafter-model",
+        type=str,
+        default="/home/llm/model_hub/Qwen3-0.6B",
+        help="Path to drafter model (overrides DRAFTER_MODEL env var)"
+    )
+    
     # Note: GPU allocation is controlled by environment variables (TARGET_GPU, DRAFTER_GPU)
-    # set in run_benchmark.sh, not by command line arguments
+    # set in run_benchmark.sh
+    
     args = parser.parse_args()
     
-    BenchmarkRunner()
+    BenchmarkRunner(target_model=args.target_model, drafter_model=args.drafter_model)
 
