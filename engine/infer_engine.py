@@ -57,6 +57,16 @@ def infer_batch(ctx, prompts: List[str]) -> Tuple[Optional[BatchMetrics], Option
         chat=False  # Already formatted above if needed
     )
 
+    drafter_device = getattr(ctx, "drafter_device", None)
+    target_device = getattr(ctx, "target_device", None)
+
+    if ctx.spec and drafter_device is not None:
+        input_ids = input_ids.to(drafter_device)
+        attention_mask = attention_mask.to(drafter_device)
+    elif ctx.target_gen and target_device is not None:
+        input_ids = input_ids.to(target_device)
+        attention_mask = attention_mask.to(target_device)
+
     # Step 3: Reset ngram storage if needed (for ngram-assisted decoding)
     if ctx.reset_in_between and ctx.ngram is not None:
         ctx.ngram.reset()
@@ -179,6 +189,7 @@ def batch_speculative_generate(ctx, input_ids: torch.Tensor, attention_mask: tor
     batch_accept_rates: List[float] = []
 
     device = input_ids.device
+    target_device = getattr(ctx, "target_device", device)
     # 存储所有生成的token，形状: [batch_size, gen_len]
     generated_tokens = torch.zeros(batch_size, ctx.gen_len, device=device, dtype=torch.long)
     # 标记每个序列是否已完成生成（遇到结束token）
@@ -255,19 +266,17 @@ def batch_speculative_generate(ctx, input_ids: torch.Tensor, attention_mask: tor
         active_mask = ~finished
         if active_mask.any():
             # 构建完整的序列：prompt + 已生成的token + 本次的gamma个草稿token
-            # 确保所有张量在正确的设备上（多GPU环境下很重要）
-            verify_ids = torch.cat([input_ids.to(device), generated_tokens[:, :step + current_gamma].to(device)], dim=1)
+            draft_segment = generated_tokens[:, :step + current_gamma]
+            verify_ids = torch.cat([input_ids, draft_segment], dim=1).to(target_device)
             with torch.no_grad():
                 # Target一次性前向传播，验证所有gamma个位置
                 t_out = ctx.target(verify_ids)
                 # 提取gamma个位置的logits（对应gamma个草稿token的位置）
                 t_logits_full = t_out.logits[:, -(current_gamma+1):-1, :]
-                # 确保logits在正确的设备上，然后计算概率
-                t_logits_full = t_logits_full.to(device)
                 p_probs_full = torch.softmax(t_logits_full, dim=-1)  # target的概率分布 p(x)
 
             # ========== 阶段4: 对每个序列逐个进行accept/reject决策 ==========
-            active_indices = torch.where(active_mask)[0].to(device)  # 确保索引在正确的设备上
+            active_indices = torch.where(active_mask)[0]
             for global_idx in active_indices:
                 local_row = global_idx.item()
                 if finished[global_idx]:
@@ -281,10 +290,8 @@ def batch_speculative_generate(ctx, input_ids: torch.Tensor, attention_mask: tor
 
                     sampled_token = draft_tokens[global_idx, draft_idx].item()
                     q_vec = q_probs_full[global_idx, draft_idx]  # drafter在draft_idx位置的概率分布
-                    p_vec = p_probs_full[local_row, draft_idx]   # target在draft_idx位置的概率分布
-                    # 确保概率向量在正确的设备上
+                    p_vec = p_probs_full[local_row, draft_idx].to(device)   # target在draft_idx位置的概率分布
                     q_vec = q_vec.to(device)
-                    p_vec = p_vec.to(device)
 
                     # 提取采样token的概率
                     p_sample = p_vec[sampled_token].item()  # target对该token的概率

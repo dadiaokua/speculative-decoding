@@ -191,6 +191,17 @@ class BenchmarkRunner:
         
         target_gpu_ids = get_gpu_ids(target_gpu_env)
         drafter_gpu_ids = get_gpu_ids(drafter_gpu_env)
+
+        def resolve_primary_device(gpu_ids, fallback: str = "cuda:0"):
+            if gpu_ids:
+                return torch.device(f"cuda:{gpu_ids[0]}")
+            if torch.cuda.is_available():
+                return torch.device(fallback)
+            return torch.device("cpu")
+
+        self.target_device = resolve_primary_device(target_gpu_ids)
+        # If drafter GPUs are not specified, fall back to target device so everything stays consistent
+        self.drafter_device = resolve_primary_device(drafter_gpu_ids, fallback=self.target_device.type + (f":{self.target_device.index}" if self.target_device.index is not None else ""))
         
         print(colored("Loading models...", "light_grey"))
         print(colored(f"Target: {target_model} on GPUs {target_gpu_ids} (device_map={target_device_map})", "yellow"))

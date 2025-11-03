@@ -113,7 +113,7 @@ class InferenceCLI:
         if self.auto_mode:
             self._run_auto_mode()
         else:
-            self._run()
+        self._run()
 
     def _load_models(self):
         # Target model (larger model for better quality)
