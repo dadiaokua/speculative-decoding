@@ -156,18 +156,20 @@ class BenchmarkRunner:
             Input formats:
             - "auto" -> "auto" (let transformers decide)
             - "cuda:0" -> "cuda:0" (single GPU)
-            - "cuda:0,cuda:1,cuda:2" -> "auto" with CUDA_VISIBLE_DEVICES set
+            - "cuda:0,cuda:1,cuda:2" -> {"": [0, 1, 2]} (multi-GPU with explicit device list)
             
-            Note: For multi-GPU, we use "auto" mode which works better with newer transformers versions.
-            The actual GPU allocation is controlled by CUDA_VISIBLE_DEVICES environment variable.
+            Note: We use explicit device lists for multi-GPU to avoid CUDA_VISIBLE_DEVICES conflicts.
             """
             if gpu_string == "auto":
                 return "auto"
             elif "," in gpu_string:
-                # Multi-GPU case: Use "auto" mode
-                # The actual GPU selection is handled by CUDA_VISIBLE_DEVICES
-                # Transformers will automatically distribute layers across visible GPUs
-                return "auto"
+                # Multi-GPU case: extract GPU IDs and create device_map
+                gpu_ids = []
+                for gpu in gpu_string.split(","):
+                    if gpu.startswith("cuda:"):
+                        gpu_ids.append(int(gpu.split(":")[1]))
+                # Return device_map with all model components on the specified GPUs
+                return {"": gpu_ids}
             else:
                 # Single GPU case: "cuda:0"
                 return gpu_string
@@ -193,66 +195,53 @@ class BenchmarkRunner:
         drafter_gpu_ids = get_gpu_ids(drafter_gpu_env)
 
         def resolve_primary_device(gpu_ids, fallback: str = "cuda:0"):
+            """
+            Resolve primary device for a model.
+            
+            When using explicit device_map with GPU lists, we use the first GPU
+            in the list as the primary device for tensor operations.
+            """
             if gpu_ids:
+                # Use the first GPU in the list as primary device
                 return torch.device(f"cuda:{gpu_ids[0]}")
             if torch.cuda.is_available():
                 return torch.device(fallback)
             return torch.device("cpu")
 
         self.target_device = resolve_primary_device(target_gpu_ids)
-        # If drafter GPUs are not specified, fall back to target device so everything stays consistent
-        self.drafter_device = resolve_primary_device(drafter_gpu_ids, fallback=self.target_device.type + (f":{self.target_device.index}" if self.target_device.index is not None else ""))
+        self.drafter_device = resolve_primary_device(drafter_gpu_ids)
         
         print(colored("Loading models...", "light_grey"))
         print(colored(f"Target: {target_model} on GPUs {target_gpu_ids} (device_map={target_device_map})", "yellow"))
         print(colored(f"Drafter: {drafter_model} on GPUs {drafter_gpu_ids} (device_map={drafter_device_map})", "yellow"))
         
-        # Set CUDA_VISIBLE_DEVICES for target model
-        original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-        if target_gpu_ids:
-            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, target_gpu_ids))
-        
-        try:
-            self.target = AutoModelForCausalLM.from_pretrained(
-                target_model,
-                quantization_config=None,
-                dtype=model_dtype,  # Use dtype instead of torch_dtype (deprecated)
-                device_map=target_device_map,
-                attn_implementation="sdpa",
-                trust_remote_code=True,
-            )
-            self.target.eval()
-        finally:
-            # Restore original CUDA_VISIBLE_DEVICES
-            if original_cuda_visible:
-                os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
-            else:
-                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        # Load target model
+        # No need for CUDA_VISIBLE_DEVICES manipulation - explicit device_map handles GPU allocation
+        self.target = AutoModelForCausalLM.from_pretrained(
+            target_model,
+            quantization_config=None,
+            dtype=model_dtype,  # Use dtype instead of torch_dtype (deprecated)
+            device_map=target_device_map,
+            attn_implementation="sdpa",
+            trust_remote_code=True,
+        )
+        self.target.eval()
         
         self.tokenizer = AutoTokenizer.from_pretrained(target_model, trust_remote_code=True)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        # Set CUDA_VISIBLE_DEVICES for drafter model
-        if drafter_gpu_ids:
-            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, drafter_gpu_ids))
-        
-        try:
-            self.drafter = AutoModelForCausalLM.from_pretrained(
-                drafter_model,
-                quantization_config=None,
-                dtype=model_dtype,  # Use dtype instead of torch_dtype (deprecated)
-                device_map=drafter_device_map,
-                attn_implementation="sdpa",
-                trust_remote_code=True,
-            )
-            self.drafter.eval()
-        finally:
-            # Restore original CUDA_VISIBLE_DEVICES
-            if original_cuda_visible:
-                os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
-            else:
-                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        # Load drafter model
+        # No need for CUDA_VISIBLE_DEVICES manipulation - explicit device_map handles GPU allocation
+        self.drafter = AutoModelForCausalLM.from_pretrained(
+            drafter_model,
+            quantization_config=None,
+            dtype=model_dtype,  # Use dtype instead of torch_dtype (deprecated)
+            device_map=drafter_device_map,
+            attn_implementation="sdpa",
+            trust_remote_code=True,
+        )
+        self.drafter.eval()
         
         # End tokens - tokens that signal the end of generation
         # When any of these tokens are generated, the model will stop generating

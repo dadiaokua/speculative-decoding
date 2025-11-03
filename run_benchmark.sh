@@ -37,12 +37,16 @@ print_info "Project directory: $PROJECT_DIR"
 # Available GPU devices
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
-# GPU allocation strategy: multi_gpu_ratio, separate, same, auto
-GPU_STRATEGY="multi_gpu_ratio"
+# GPU allocation strategy: multi_gpu_ratio, separate, same, shared_all, auto
+# - multi_gpu_ratio: Split GPUs by ratio (e.g., 7:1)
+# - shared_all: Both models use all 8 GPUs (recommended for 32GB+ GPUs)
+# - separate: Target on GPU 0, Drafter on GPU 1
+# - same: Both models on GPU 0
+GPU_STRATEGY="shared_all"
 
 # GPU ratio configuration
-TARGET_GPU_RATIO=6    # Target model uses this many GPUs (0-5)
-DRAFTER_GPU_RATIO=2   # Drafter model uses this many GPUs (6-7)
+TARGET_GPU_RATIO=7    # Target model uses this many GPUs (0-6)
+DRAFTER_GPU_RATIO=1   # Drafter model uses this many GPUs (7)
 
 # Validate GPU ratio
 TOTAL_GPUS=$((TARGET_GPU_RATIO + DRAFTER_GPU_RATIO))
@@ -88,7 +92,15 @@ case $GPU_STRATEGY in
     "same")
         export TARGET_GPU="cuda:0"
         export DRAFTER_GPU="cuda:0"
-        print_info "GPU Strategy: Shared GPU"
+        print_info "GPU Strategy: Shared GPU (single GPU)"
+        ;;
+    "shared_all")
+        # Both models use all 8 GPUs - best for high-memory GPUs (32GB+)
+        export TARGET_GPU="cuda:0,cuda:1,cuda:2,cuda:3,cuda:4,cuda:5,cuda:6,cuda:7"
+        export DRAFTER_GPU="cuda:0,cuda:1,cuda:2,cuda:3,cuda:4,cuda:5,cuda:6,cuda:7"
+        print_info "GPU Strategy: Shared All GPUs (8:8)"
+        print_info "  Both Target and Drafter use all 8 GPUs"
+        print_info "  Optimal for V100 32GB or A100"
         ;;
     "auto")
         export TARGET_GPU="auto"
