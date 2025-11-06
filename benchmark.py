@@ -87,6 +87,8 @@ class BenchmarkRunner:
             print(colored(f"⚠️  Warning: Unknown INFERENCE_ENGINE '{self.inference_engine}', defaulting to 'transformers'", "yellow"))
             self.inference_engine = "transformers"
         
+        print(colored(f"🔧 Inference Engine: {self.inference_engine}", "cyan"))
+        
         # Check vLLM availability
         if self.inference_engine == "vllm" and not is_vllm_available():
             print(colored("❌ Error: vLLM engine selected but vLLM is not installed!", "red"))

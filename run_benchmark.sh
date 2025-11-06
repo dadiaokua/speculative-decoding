@@ -175,13 +175,13 @@ export AUTO_RATE=1.0                     # 请求速率（prompts/秒，仅时�
 export AUTO_DURATION=300                 # 测试时长（秒，仅时间模式）
 
 # 批处理配置（当前实现为单请求模式，批处理功能待启用）
-export ENABLE_BATCH="false"               # 是否启用批处理
-export BATCH_SIZE=4                      # 批大小
+export ENABLE_BATCH="true"               # 是否启用批处理
+export BATCH_SIZE=5                      # 批大小
 export MAX_BATCH_LENGTH=512               # 批内最大序列长度
 
 # 生成参数
 export GENERATION_LENGTH=100             # 每个请求生成的token数量
-export GAMMA_VALUE=4                     # Gamma参数（推测解码的草稿token数）
+export GAMMA_VALUE=5                     # Gamma参数（推测解码的草稿token数）
 
 # 推理引擎选择
 # - "transformers": 使用Hugging Face Transformers（默认）
@@ -204,9 +204,9 @@ export VLLM_DISABLE_LOG_STATS=true       # 是否禁用日志统计
 export VLLM_DTYPE="half"                 # 数据类型: "half", "float16", "bfloat16"
 
 # vLLM推测解码参数（可选，启用后使用vLLM原生推测解码）
-export VLLM_ENABLE_SPECULATIVE="false"   # 是否启用vLLM推测解码
+export VLLM_ENABLE_SPECULATIVE="true"   # 是否启用vLLM推测解码
 export VLLM_NUM_SPECULATIVE_TOKENS=5     # 推测token数量（对应GAMMA_VALUE）
-export VLLM_USE_V2_BLOCK_MANAGER="true"  # 是否使用v2块管理器（推荐）
+export VLLM_USE_V2_BLOCK_MANAGER="false"  # 是否使用v2块管理器（推荐）
 
 # GPU监控配置
 #
