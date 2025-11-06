@@ -17,10 +17,12 @@ from engine.dataset import load_sharegpt_multi
 from engine.infer_engine import infer_batch
 from engine.metrics import BenchmarkResults, print_benchmark_summary, print_comparison
 from engine.gpu_monitor import GPUMonitor, print_gpu_summary
+from engine.vllm_engine import VLLMEngineManager, VLLMConfig, is_vllm_available, create_vllm_config_from_env
 from utils.logits_processor import GreedyProcessor
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import time
 import os
+import asyncio
 from termcolor import colored
 
 
@@ -50,7 +52,16 @@ class BenchmarkRunner:
         self._load_config()
         
         # Load models
-        self._load_models()
+        if self.inference_engine == "transformers":
+            self._load_models()
+        else:  # vllm
+            # vLLM engine will be initialized asynchronously later
+            self.vllm_target = None
+            self.vllm_drafter = None
+            self.target = None
+            self.drafter = None
+            self.target_tokenizer = None
+            self.drafter_tokenizer = None
         
         # Load dataset
         self._load_sharegpt_data()
@@ -59,12 +70,28 @@ class BenchmarkRunner:
         self.processor = GreedyProcessor()
         
         # Run benchmark
-        self._run_benchmark()
+        if self.inference_engine == "vllm":
+            # vLLM requires async execution
+            asyncio.run(self._run_benchmark_vllm())
+        else:
+            self._run_benchmark()
     
     def _load_config(self):
         """Load configuration from environment variables."""
         self.gamma = int(os.getenv("GAMMA_VALUE", "4"))
         self.gen_len = int(os.getenv("GENERATION_LENGTH", "100"))
+        
+        # Inference engine: "transformers" or "vllm"
+        self.inference_engine = os.getenv("INFERENCE_ENGINE", "transformers").lower()
+        if self.inference_engine not in ["transformers", "vllm"]:
+            print(colored(f"⚠️  Warning: Unknown INFERENCE_ENGINE '{self.inference_engine}', defaulting to 'transformers'", "yellow"))
+            self.inference_engine = "transformers"
+        
+        # Check vLLM availability
+        if self.inference_engine == "vllm" and not is_vllm_available():
+            print(colored("❌ Error: vLLM engine selected but vLLM is not installed!", "red"))
+            print(colored("   Please install vLLM: pip install vllm", "yellow"))
+            raise RuntimeError("vLLM not available")
         
         # Inference method: "speculative" or "target_ar" (only one at a time)
         inference_method = os.getenv("INFERENCE_METHOD", "speculative").lower()
@@ -156,20 +183,17 @@ class BenchmarkRunner:
             Input formats:
             - "auto" -> "auto" (let transformers decide)
             - "cuda:0" -> "cuda:0" (single GPU)
-            - "cuda:0,cuda:1,cuda:2" -> {"": [0, 1, 2]} (multi-GPU with explicit device list)
+            - "cuda:0,cuda:1,..." -> "auto" (multi-GPU, let transformers distribute)
             
-            Note: We use explicit device lists for multi-GPU to avoid CUDA_VISIBLE_DEVICES conflicts.
+            Note: For multi-GPU, we use "auto" mode with CUDA_VISIBLE_DEVICES
+            to ensure proper device allocation without conflicts.
             """
             if gpu_string == "auto":
                 return "auto"
             elif "," in gpu_string:
-                # Multi-GPU case: extract GPU IDs and create device_map
-                gpu_ids = []
-                for gpu in gpu_string.split(","):
-                    if gpu.startswith("cuda:"):
-                        gpu_ids.append(int(gpu.split(":")[1]))
-                # Return device_map with all model components on the specified GPUs
-                return {"": gpu_ids}
+                # Multi-GPU case: use "auto" to let transformers distribute layers
+                # The actual GPUs are controlled by setting CUDA_VISIBLE_DEVICES temporarily
+                return "auto"
             else:
                 # Single GPU case: "cuda:0"
                 return gpu_string
@@ -198,16 +222,26 @@ class BenchmarkRunner:
             """
             Resolve primary device for a model.
             
-            When using explicit device_map with GPU lists, we use the first GPU
-            in the list as the primary device for tensor operations.
+            Important: When using CUDA_VISIBLE_DEVICES with device_map="auto",
+            the GPUs are remapped. For example:
+            - CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" makes physical GPU 0 → logical cuda:0
+            - CUDA_VISIBLE_DEVICES="6,7" makes physical GPU 6 → logical cuda:0
+            
+            Since we set CUDA_VISIBLE_DEVICES during model loading, we always use
+            cuda:0 as the primary device (which maps to the first physical GPU in the list).
             """
             if gpu_ids:
-                # Use the first GPU in the list as primary device
-                return torch.device(f"cuda:{gpu_ids[0]}")
+                # Always use cuda:0 because CUDA_VISIBLE_DEVICES remaps the first visible GPU to index 0
+                return torch.device("cuda:0")
             if torch.cuda.is_available():
                 return torch.device(fallback)
             return torch.device("cpu")
 
+        # Store physical GPU IDs for reference (used in logging and monitoring)
+        self.target_gpu_ids = target_gpu_ids
+        self.drafter_gpu_ids = drafter_gpu_ids
+        
+        # Primary devices for tensor operations (always cuda:0 after CUDA_VISIBLE_DEVICES remapping)
         self.target_device = resolve_primary_device(target_gpu_ids)
         self.drafter_device = resolve_primary_device(drafter_gpu_ids)
         
@@ -215,8 +249,13 @@ class BenchmarkRunner:
         print(colored(f"Target: {target_model} on GPUs {target_gpu_ids} (device_map={target_device_map})", "yellow"))
         print(colored(f"Drafter: {drafter_model} on GPUs {drafter_gpu_ids} (device_map={drafter_device_map})", "yellow"))
         
-        # Load target model
-        # No need for CUDA_VISIBLE_DEVICES manipulation - explicit device_map handles GPU allocation
+        # Save original CUDA_VISIBLE_DEVICES
+        original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        
+        # Load target model with temporary CUDA_VISIBLE_DEVICES
+        if target_gpu_ids and target_device_map == "auto":
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, target_gpu_ids))
+        
         self.target = AutoModelForCausalLM.from_pretrained(
             target_model,
             quantization_config=None,
@@ -227,12 +266,18 @@ class BenchmarkRunner:
         )
         self.target.eval()
         
+        # Restore CUDA_VISIBLE_DEVICES after loading target
+        if original_cuda_visible:
+            os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
+        
         self.tokenizer = AutoTokenizer.from_pretrained(target_model, trust_remote_code=True)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        # Load drafter model
-        # No need for CUDA_VISIBLE_DEVICES manipulation - explicit device_map handles GPU allocation
+        # Load drafter model with temporary CUDA_VISIBLE_DEVICES
+        if drafter_gpu_ids and drafter_device_map == "auto":
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, drafter_gpu_ids))
+        
         self.drafter = AutoModelForCausalLM.from_pretrained(
             drafter_model,
             quantization_config=None,
@@ -242,6 +287,10 @@ class BenchmarkRunner:
             trust_remote_code=True,
         )
         self.drafter.eval()
+        
+        # Restore CUDA_VISIBLE_DEVICES after loading drafter
+        if original_cuda_visible:
+            os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
         
         # End tokens - tokens that signal the end of generation
         # When any of these tokens are generated, the model will stop generating
@@ -575,6 +624,222 @@ class BenchmarkRunner:
             with open(self.output_file, 'w') as f:
                 json.dump(combined, f, indent=2)
             print(colored(f"✅ Results saved to {self.output_file}", "green"))
+    
+    async def _vllm_process_request(self, prompt_idx: int, prompt: str, submit_time: float, 
+                                     start_time: float, target_results):
+        """处理单个vLLM请求（异步）
+        
+        Args:
+            prompt_idx: 请求索引
+            prompt: 输入提示文本
+            submit_time: 请求提交时间
+            start_time: 基准测试开始时间
+            target_results: 结果收集对象
+            
+        Returns:
+            bool: 是否成功
+        """
+        print(colored(
+            f"\n🎲 Request #{prompt_idx} submitted (elapsed {submit_time - start_time:.1f}s)",
+            "magenta", attrs=["bold"]
+        ))
+        
+        request_start = time.time()
+        try:
+            output = await self.vllm_target.generate(
+                prompt,
+                max_tokens=self.gen_len,
+                temperature=1.0,
+                top_p=1.0
+            )
+            request_end = time.time()
+            
+            if output:
+                # Create metrics
+                from engine.metrics import InferenceMetrics
+                metrics = InferenceMetrics()
+                metrics.latency = request_end - request_start
+                metrics.ttft = 0.0  # vLLM doesn't provide TTFT easily
+                metrics.num_generated_tokens = len(output.split())  # Approximate
+                metrics.throughput = metrics.num_generated_tokens / metrics.latency if metrics.latency > 0 else 0
+                
+                target_results.batches.append(metrics)
+                target_results.total_requests += 1
+                
+                queue_time = request_start - submit_time
+                print(colored(
+                    f"✅ Request #{prompt_idx} completed: {metrics.num_generated_tokens} tokens in {metrics.latency:.3f}s "
+                    f"(queue_time: {queue_time:.3f}s)",
+                    "green"
+                ))
+                return True
+            else:
+                print(colored(f"❌ Request #{prompt_idx} failed", "red"))
+                return False
+        except Exception as e:
+            print(colored(f"❌ Request #{prompt_idx} error: {e}", "red"))
+            return False
+    
+    async def _run_benchmark_vllm(self):
+        """Run benchmark using vLLM engine (async version)."""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        print(colored("\n🚀 Starting Benchmark", "cyan", attrs=["bold"]))
+        
+        # Get model paths
+        target_model = (
+            self.target_model_arg 
+            if self.target_model_arg is not None 
+            else os.getenv("TARGET_MODEL", "/home/llm/model_hub/Qwen3-8B")
+        )
+        drafter_model = (
+            self.drafter_model_arg 
+            if self.drafter_model_arg is not None 
+            else os.getenv("DRAFTER_MODEL", "/home/llm/model_hub/Qwen3-0.6B")
+        )
+        
+        # Initialize vLLM engines
+        print(colored("Initializing vLLM engine...", "yellow"))
+        
+        # 从环境变量创建配置
+        vllm_config = create_vllm_config_from_env()
+        vllm_config.model_path = target_model
+        
+        # 检查是否使用推测解码
+        use_spec = self.spec and vllm_config.enable_speculative
+        
+        if self.spec and not vllm_config.enable_speculative:
+            print(colored("⚠️  Warning: INFERENCE_METHOD=speculative but VLLM_ENABLE_SPECULATIVE=false", "yellow"))
+            print(colored("   Set VLLM_ENABLE_SPECULATIVE=true to enable vLLM native speculative decoding", "yellow"))
+            print(colored("   Falling back to target-only generation", "yellow"))
+        
+        if use_spec:
+            # vLLM 原生推测解码模式
+            vllm_config.speculative_model = drafter_model
+            print(colored(f"✅ 使用 vLLM 原生推测解码", "green"))
+            print(colored(f"   Target: {target_model}", "cyan"))
+            print(colored(f"   Drafter: {drafter_model}", "cyan"))
+            print(colored(f"   推测token数: {vllm_config.num_speculative_tokens}", "cyan"))
+        
+        # 初始化引擎
+        self.vllm_target = VLLMEngineManager(vllm_config, logger)
+        
+        if not await self.vllm_target.initialize():
+            print(colored("❌ Failed to initialize vLLM engine", "red"))
+            return
+        
+        # Display configuration
+        if self.num_prompts > 0:
+            print(f"Rate: {self.auto_rate:.2f} prompts/s")
+            print(f"Total Prompts: {self.num_prompts}")
+        else:
+            print(f"Rate: {self.auto_rate:.2f} prompts/s")
+            print(f"Duration: {self.auto_duration:.1f} s")
+        
+        print(f"Batch mode: {self.enable_batch}")
+        if use_spec:
+            print(f"Inference Method: Speculative Decoding (vLLM Native)")
+        else:
+            print(f"Inference Method: Target AR (vLLM)")
+        print("=" * 70)
+        
+        # Initialize results
+        method_name = "speculative_vllm" if use_spec else "target_ar_vllm"
+        target_results = BenchmarkResults(method_name=method_name)
+        
+        # Start GPU monitoring
+        gpu_monitor = None
+        gpu_monitor_results = None
+        if self.gpu_monitor_enabled:
+            gpu_ids = list(range(8))  # Monitor all 8 GPUs for vLLM
+            gpu_monitor = GPUMonitor(
+                gpu_ids=gpu_ids,
+                sampling_interval=self.gpu_monitor_interval
+            )
+            gpu_monitor.start()
+            print(colored(f"✅ GPU Monitor started (GPUs: {gpu_ids}, interval: {self.gpu_monitor_interval}s)", "green"))
+        
+        # Run benchmark with concurrent requests
+        start_time = time.time()
+        target_results.start_time = start_time
+        
+        use_num_prompts = self.num_prompts > 0
+        if use_num_prompts:
+            end_time = None
+            target_requests = self.num_prompts
+        else:
+            end_time = start_time + self.auto_duration
+            target_requests = None
+        
+        # 请求发送循环
+        tasks = []
+        total_requests = 0
+        interval = 1.0 / self.auto_rate if not use_num_prompts else 0
+        prompt_idx = 0
+        
+        while True:
+            now = time.time()
+            
+            # 检查是否达到停止条件
+            if use_num_prompts:
+                if total_requests >= target_requests:
+                    break
+            else:
+                if now >= end_time:
+                    break
+            
+            # 发送新请求
+            prompt = self._get_random_prompt()
+            prompt_idx += 1
+            total_requests += 1
+            
+            # 创建异步任务（不等待完成）
+            task = asyncio.create_task(
+                self._vllm_process_request(prompt_idx, prompt, now, start_time, target_results)
+            )
+            tasks.append(task)
+            
+            # 控制发送速率
+            if interval > 0:
+                await asyncio.sleep(interval)
+        
+        # 等待所有请求完成
+        print(colored(f"\n⏳ Waiting for all {len(tasks)} requests to complete...", "cyan"))
+        await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Stop GPU monitoring
+        if gpu_monitor:
+            gpu_monitor_results = gpu_monitor.stop()
+            print(colored(f"🛑 GPU Monitor stopped (collected {len(gpu_monitor_results.snapshots)} snapshots)", "cyan"))
+        
+        # Print results
+        print(colored("\n" + "=" * 70, "cyan"))
+        print(colored("📊 Benchmark Results", "cyan", attrs=["bold"]))
+        print(colored("=" * 70, "cyan"))
+        
+        print_benchmark_summary(target_results)
+        
+        if gpu_monitor_results:
+            print_gpu_summary(gpu_monitor_results)
+            gpu_output_file = self.output_file.replace(".json", "_gpu.json")
+            if gpu_monitor:
+                gpu_monitor.save_results(gpu_output_file, results=gpu_monitor_results)
+        
+        # Save results
+        import json
+        combined = {
+            "target_ar_vllm": target_results.to_dict()
+        }
+        if gpu_monitor_results:
+            combined["gpu_monitoring"] = gpu_monitor_results.to_dict()
+        
+        with open(self.output_file, 'w') as f:
+            json.dump(combined, f, indent=2)
+        print(colored(f"✅ Results saved to {self.output_file}", "green"))
+        
+        # Cleanup
+        await self.vllm_target.shutdown()
 
 
 if __name__ == "__main__":

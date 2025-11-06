@@ -1,7 +1,20 @@
-"""GPU Power and Performance Monitor for Benchmarking.
+"""GPU功率和性能监控模块
 
-This module monitors GPU power consumption, utilization, memory usage,
-and temperature during benchmark runs.
+本模块用于在基准测试运行期间监控GPU的功率消耗、利用率、内存使用和温度。
+
+主要功能：
+1. 实时采集GPU硬件指标（功率、温度、利用率等）
+2. 通过时间积分法计算能耗（梯形积分）
+3. 记录性能指标（吞吐量、延迟、token生成数等）
+4. 计算能效指标（每焦耳生成的token数）
+
+使用方法：
+    monitor = GPUMonitor(gpu_ids=[0,1,2], sampling_interval=0.5)
+    monitor.start()
+    # ... 运行benchmark ...
+    monitor.stop()
+    results = monitor.get_results()
+    print_gpu_summary(results)
 """
 
 import subprocess
@@ -17,70 +30,105 @@ from termcolor import colored
 
 @dataclass
 class GPUSnapshot:
-    """Single snapshot of GPU metrics."""
-    timestamp: float
-    gpu_id: int
-    power_draw: float  # Watts
-    power_limit: float  # Watts
-    utilization_gpu: float  # Percentage
-    utilization_memory: float  # Percentage
-    memory_used: int  # MB
-    memory_total: int  # MB
-    temperature: float  # Celsius
-    clock_graphics: int  # MHz
-    clock_memory: int  # MHz
+    """GPU指标的单次快照
     
-    # Performance metrics (optional, set by benchmark)
-    total_tokens_generated: int = 0  # Total tokens generated so far
-    total_tokens_accepted: int = 0   # Total tokens accepted (for speculative decoding)
-    requests_completed: int = 0      # Number of requests completed so far
-    throughput: float = 0.0           # Current throughput (tokens/s)
-    avg_ttft: float = 0.0            # Average TTFT so far
-    avg_latency: float = 0.0         # Average latency so far
+    存储某一时刻所有GPU硬件指标和性能指标的快照数据。
+    每个采样间隔（如0.5秒）会生成一次快照。
+    """
+    # 时间戳和标识
+    timestamp: float            # 采样时间戳（Unix时间）
+    gpu_id: int                 # GPU编号（0-7）
+    
+    # 功率指标（通过nvidia-smi查询）
+    power_draw: float           # 当前功率消耗（瓦特）
+    power_limit: float          # 功率上限（瓦特）
+    
+    # 利用率指标
+    utilization_gpu: float      # GPU计算利用率（百分比 0-100）
+    utilization_memory: float   # 显存带宽利用率（百分比 0-100）
+    
+    # 显存使用
+    memory_used: int            # 已使用显存（MB）
+    memory_total: int           # 总显存（MB）
+    
+    # 温度和频率
+    temperature: float          # GPU温度（摄氏度）
+    clock_graphics: int         # GPU核心频率（MHz）
+    clock_memory: int           # 显存频率（MHz）
+    
+    # 性能指标（由benchmark回调函数设置，可选）
+    total_tokens_generated: int = 0  # 截至当前已生成的总token数
+    total_tokens_accepted: int = 0   # 截至当前已接受的token数（推测解码）
+    requests_completed: int = 0      # 截至当前已完成的请求数
+    throughput: float = 0.0          # 当前吞吐量（tokens/秒）
+    avg_ttft: float = 0.0            # 当前平均首token时间（秒）
+    avg_latency: float = 0.0         # 当前平均延迟（秒）
 
 
 @dataclass
 class GPUMonitorResults:
-    """Complete GPU monitoring results."""
-    gpu_ids: List[int] = field(default_factory=list)
-    snapshots: List[GPUSnapshot] = field(default_factory=list)
-    start_time: float = 0.0
-    end_time: float = 0.0
+    """GPU监控结果汇总
     
-    # Final performance metrics (set at end of benchmark)
-    total_tokens_generated: int = 0
-    total_tokens_accepted: int = 0  # For speculative decoding
-    total_requests: int = 0
+    包含整个benchmark过程中的所有GPU快照数据，
+    并提供计算能耗、平均功率等衍生指标的方法。
+    """
+    gpu_ids: List[int] = field(default_factory=list)      # 监控的GPU列表
+    snapshots: List[GPUSnapshot] = field(default_factory=list)  # 所有采样快照
+    start_time: float = 0.0  # 监控开始时间（Unix时间戳）
+    end_time: float = 0.0    # 监控结束时间（Unix时间戳）
+    
+    # 最终性能指标（在benchmark结束时设置）
+    total_tokens_generated: int = 0    # 总共生成的token数
+    total_tokens_accepted: int = 0     # 总共接受的token数（推测解码）
+    total_requests: int = 0            # 总共完成的请求数
     
     @property
     def duration(self) -> float:
-        """Total monitoring duration in seconds."""
+        """监控总时长（秒）"""
         return self.end_time - self.start_time
     
     @property
     def total_energy_consumed(self) -> Dict[int, float]:
-        """Total energy consumed per GPU in Joules (W * s = J)."""
+        """计算每个GPU的总能耗（焦耳）
+        
+        使用梯形积分法计算能耗：
+        E = ∫ P(t) dt ≈ Σ [(P[i] + P[i+1]) / 2 * Δt]
+        
+        算法流程：
+        1. 按GPU分组所有快照
+        2. 按时间排序
+        3. 对相邻两个采样点，计算：
+           - 时间间隔 Δt = t[i+1] - t[i]
+           - 平均功率 P_avg = (P[i] + P[i+1]) / 2
+           - 能量增量 ΔE = P_avg * Δt
+        4. 累加所有时间段的能量
+        
+        返回：
+            Dict[gpu_id, energy_joules]: 每个GPU的总能耗（焦耳）
+        
+        示例：
+            {0: 150.5, 1: 148.2, ...}  # GPU 0消耗150.5焦耳
+        """
         energy = defaultdict(float)
         
-        # Group snapshots by GPU and sort by timestamp
+        # 按GPU分组快照
         gpu_snapshots = defaultdict(list)
         for snapshot in self.snapshots:
             gpu_snapshots[snapshot.gpu_id].append(snapshot)
         
-        # Calculate energy by integrating power over time
+        # 对每个GPU计算能耗
         for gpu_id, snapshots in gpu_snapshots.items():
             if len(snapshots) < 2:
-                continue
+                continue  # 少于2个采样点无法积分
             
-            # Sort by timestamp
+            # 按时间排序
             snapshots.sort(key=lambda x: x.timestamp)
             
-            # Integrate power over time intervals
+            # 梯形积分：累加每个时间段的能量
             for i in range(len(snapshots) - 1):
-                dt = snapshots[i + 1].timestamp - snapshots[i].timestamp
-                # Use average power during this interval
-                avg_power = (snapshots[i].power_draw + snapshots[i + 1].power_draw) / 2
-                energy[gpu_id] += avg_power * dt
+                dt = snapshots[i + 1].timestamp - snapshots[i].timestamp  # 时间间隔（秒）
+                avg_power = (snapshots[i].power_draw + snapshots[i + 1].power_draw) / 2  # 平均功率（瓦特）
+                energy[gpu_id] += avg_power * dt  # 能量 = 功率 × 时间（焦耳）
         
         return dict(energy)
     
@@ -156,33 +204,85 @@ class GPUMonitorResults:
     
     @property
     def tokens_per_joule(self) -> float:
-        """Tokens generated per Joule of energy consumed."""
+        """每焦耳生成的token数（能效指标）
+        
+        计算公式：tokens_per_joule = 总token数 / 总能耗(焦耳)
+        
+        这是衡量推理能效的核心指标，数值越高表示能效越好。
+        
+        返回：
+            float: 每焦耳生成的token数（tokens/J）
+        
+        示例：
+            2.5 tokens/J 表示消耗1焦耳能量可以生成2.5个token
+        """
         if self.total_energy_all_gpus <= 0:
             return 0.0
         return self.total_tokens_generated / self.total_energy_all_gpus
     
     @property
     def tokens_accepted_per_joule(self) -> float:
-        """Accepted tokens per Joule of energy consumed (for speculative decoding)."""
+        """每焦耳接受的token数（推测解码专用能效指标）
+        
+        仅用于推测解码模式，计算被target模型接受的token与能耗的比率。
+        接受的token数 < 生成的token数（因为有些draft token会被拒绝）。
+        
+        计算公式：tokens_accepted_per_joule = 接受的token数 / 总能耗(焦耳)
+        
+        返回：
+            float: 每焦耳接受的token数（tokens/J）
+        """
         if self.total_energy_all_gpus <= 0:
             return 0.0
         if self.total_tokens_accepted > 0:
             return self.total_tokens_accepted / self.total_energy_all_gpus
-        # Fallback to generated tokens if accepted not available
+        # 如果没有接受数据（非推测解码模式），回退到生成数
         return self.total_tokens_generated / self.total_energy_all_gpus
     
     @property
     def tokens_per_kwh(self) -> float:
-        """Tokens generated per kWh of energy consumed."""
-        energy_kwh = self.total_energy_all_gpus / 3600000  # Convert Joules to kWh
+        """每千瓦时生成的token数（工业化能效指标）
+        
+        将能耗转换为更直观的千瓦时(kWh)单位，便于与电费挂钩。
+        
+        转换关系：
+        1 kWh = 3,600,000 J (1千瓦时 = 1000瓦 × 3600秒)
+        
+        计算公式：
+        1. 能耗(kWh) = 总能耗(焦耳) / 3,600,000
+        2. tokens_per_kwh = 总token数 / 能耗(kWh)
+        
+        返回：
+            float: 每千瓦时生成的token数（tokens/kWh）
+        
+        实际应用示例：
+            tokens_per_kwh = 1,000,000
+            电费单价 = 0.6元/kWh
+            → 生成100万token需要1度电，成本0.6元
+        """
+        energy_kwh = self.total_energy_all_gpus / 3600000  # 焦耳转千瓦时
         if energy_kwh <= 0:
             return 0.0
         return self.total_tokens_generated / energy_kwh
     
     @property
     def tokens_accepted_per_kwh(self) -> float:
-        """Accepted tokens per kWh of energy consumed (for speculative decoding)."""
-        energy_kwh = self.total_energy_all_gpus / 3600000  # Convert Joules to kWh
+        """每千瓦时接受的token数（推测解码专用，工业化指标）
+        
+        结合推测解码和工业化单位，用于评估推测解码的实际能效收益。
+        
+        计算公式：
+        1. 能耗(kWh) = 总能耗(焦耳) / 3,600,000
+        2. tokens_accepted_per_kwh = 接受的token数 / 能耗(kWh)
+        
+        返回：
+            float: 每千瓦时接受的token数（tokens/kWh）
+        
+        对比意义：
+        - tokens_per_kwh: 衡量"生成"效率（包括被拒绝的draft）
+        - tokens_accepted_per_kwh: 衡量"有效产出"效率（仅被接受的）
+        """
+        energy_kwh = self.total_energy_all_gpus / 3600000  # 焦耳转千瓦时
         if energy_kwh <= 0:
             return 0.0
         if self.total_tokens_accepted > 0:
@@ -217,14 +317,14 @@ class GPUMonitorResults:
 class GPUMonitor:
     """Monitors GPU power and performance metrics."""
     
-    def __init__(self, gpu_ids: Optional[List[int]] = None, sampling_interval: float = 10.0, 
+    def __init__(self, gpu_ids: Optional[List[int]] = None, sampling_interval: float = 1.0, 
                  performance_callback: Optional[callable] = None):
         """
         Initialize GPU monitor.
         
         Args:
             gpu_ids: List of GPU IDs to monitor. If None, monitors all available GPUs.
-            sampling_interval: Sampling interval in seconds (default: 10.0).
+            sampling_interval: Sampling interval in seconds (default: 1.0).
             performance_callback: Optional callback function that returns performance metrics dict:
                 {
                     'total_tokens_generated': int,

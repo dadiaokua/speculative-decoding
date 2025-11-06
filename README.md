@@ -25,6 +25,7 @@ Speculative Decoding is a decoding strategy for transformers that allows to gene
 - ✅ **Automated Performance Benchmarking** - Compare Speculative Decoding vs. Target AR generation
 - ✅ **Comprehensive Metrics Collection** - TTFT, latency, throughput, token counts, acceptance rates
 - ✅ **GPU Power Monitoring** - Real-time GPU power consumption and performance tracking
+- ✅ **Dual Inference Engines** - Support for both Transformers and vLLM (high-performance inference)
 - ✅ **Batch Inference Support** - Efficient batch processing for both speculative and autoregressive decoding
 - ✅ **Multi-GPU Deployment** - Flexible GPU allocation strategies for optimal resource utilization
 - ✅ **Detailed Performance Reports** - JSON output with complete benchmark results
@@ -50,6 +51,16 @@ bitsandbytes>=0.43.1
 numpy
 ```
 
+### Optional: Install vLLM for High-Performance Inference
+
+vLLM is a high-performance inference engine that can provide 2-10x speedup over standard Transformers:
+
+```bash
+pip install vllm
+```
+
+See [vLLM Integration Guide](docs/VLLM_INTEGRATION.md) for detailed instructions.
+
 ## Quick Start
 
 ### 1. Configure GPU Allocation
@@ -70,7 +81,24 @@ DRAFTER_GPU_RATIO=2   # Drafter model uses 2 GPUs
 
 For detailed GPU deployment information, see [GPU Deployment Guide](docs/GPU_DEPLOYMENT.md).
 
-### 2. Configure Benchmark Parameters
+### 2. Choose Inference Engine
+
+Edit `run_benchmark.sh` to choose the inference engine:
+
+```bash
+# Inference engine: "transformers" (default) or "vllm" (high-performance)
+export INFERENCE_ENGINE="transformers"   # Options: "transformers", "vllm"
+
+# vLLM parameters (only used when INFERENCE_ENGINE="vllm")
+export VLLM_TENSOR_PARALLEL_SIZE=8       # Tensor parallel size (usually = # of GPUs)
+export VLLM_GPU_MEMORY_UTILIZATION=0.9   # GPU memory utilization (0-1)
+export VLLM_MAX_MODEL_LEN=4096           # Max model length
+export VLLM_MAX_NUM_SEQS=128             # Max concurrent sequences
+```
+
+See [vLLM Integration Guide](docs/VLLM_INTEGRATION.md) for more details.
+
+### 3. Configure Benchmark Parameters
 
 Edit `run_benchmark.sh` to set benchmark parameters:
 
@@ -83,26 +111,23 @@ export NUM_PROMPTS=100
 export AUTO_RATE=1.0              # Requests per second
 export AUTO_DURATION=300          # Duration in seconds
 
-# Batch processing
-export ENABLE_BATCH="true"        # Enable batch processing
-export BATCH_SIZE=4               # Batch size
-export MAX_BATCH_LENGTH=512       # Max sequence length
-
 # Generation parameters
 export GENERATION_LENGTH=100      # Generation length in tokens
 export GAMMA_VALUE=4              # Gamma parameter for speculative decoding
 
-# Feature flags
-export ENABLE_SPECULATIVE="true"  # Enable speculative decoding
-export ENABLE_TARGET="true"       # Enable target AR (for comparison)
+# Inference method: "speculative" or "target_ar"
+export INFERENCE_METHOD="speculative"    # Options: "speculative", "target_ar"
+
+# GPU monitoring
 export ENABLE_GPU_MONITOR="true"  # Enable GPU power monitoring
+export GPU_MONITOR_INTERVAL=0.5   # Monitoring interval (seconds)
 ```
 
-### 3. Run Benchmark
+### 4. Run Benchmark
 
 ```bash
 chmod +x run_benchmark.sh
-./run_benchmark.sh
+bash run_benchmark.sh
 ```
 
 The benchmark will:
