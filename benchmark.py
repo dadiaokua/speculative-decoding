@@ -657,20 +657,33 @@ class BenchmarkRunner:
             request_end = time.time()
             
             if output:
-                # Create metrics
-                from engine.metrics import InferenceMetrics
-                metrics = InferenceMetrics()
-                metrics.latency = request_end - request_start
-                metrics.ttft = 0.0  # vLLM doesn't provide TTFT easily
-                metrics.num_generated_tokens = len(output.split())  # Approximate
-                metrics.throughput = metrics.num_generated_tokens / metrics.latency if metrics.latency > 0 else 0
+                # Create metrics using RequestMetrics and BatchMetrics
+                from engine.metrics import RequestMetrics, BatchMetrics
                 
-                target_results.batches.append(metrics)
+                # Create request metric
+                req_metric = RequestMetrics()
+                req_metric.start_time = request_start
+                req_metric.end_time = request_end
+                req_metric.first_token_time = request_start  # vLLM doesn't provide TTFT easily
+                req_metric.ttft = 0.0
+                req_metric.total_latency = request_end - request_start
+                req_metric.generated_tokens = len(output.split())  # Approximate
+                req_metric.prompt_tokens = len(prompt.split())  # Approximate
+                req_metric.total_tokens = req_metric.prompt_tokens + req_metric.generated_tokens
+                
+                # Create batch metric (single request batch)
+                batch_metric = BatchMetrics()
+                batch_metric.batch_size = 1
+                batch_metric.batch_start_time = request_start
+                batch_metric.batch_end_time = request_end
+                batch_metric.requests.append(req_metric)
+                
+                target_results.batches.append(batch_metric)
                 target_results.total_requests += 1
                 
                 queue_time = request_start - submit_time
                 print(colored(
-                    f"✅ Request #{prompt_idx} completed: {metrics.num_generated_tokens} tokens in {metrics.latency:.3f}s "
+                    f"✅ Request #{prompt_idx} completed: {req_metric.generated_tokens} tokens in {req_metric.total_latency:.3f}s "
                     f"(queue_time: {queue_time:.3f}s)",
                     "green"
                 ))
@@ -810,10 +823,20 @@ class BenchmarkRunner:
         print(colored(f"\n⏳ Waiting for all {len(tasks)} requests to complete...", "cyan"))
         await asyncio.gather(*tasks, return_exceptions=True)
         
+        # Finalize results
+        target_results.end_time = time.time()
+        target_results.total_batches = len(target_results.batches)
+        
         # Stop GPU monitoring
         if gpu_monitor:
             gpu_monitor_results = gpu_monitor.stop()
             print(colored(f"🛑 GPU Monitor stopped (collected {len(gpu_monitor_results.snapshots)} snapshots)", "cyan"))
+            
+            # Set GPU monitor final metrics
+            if gpu_monitor_results:
+                gpu_monitor_results.total_tokens_generated = target_results.total_tokens
+                gpu_monitor_results.total_tokens_accepted = 0  # vLLM doesn't expose this easily
+                gpu_monitor_results.total_requests = target_results.total_requests
         
         # Print results
         print(colored("\n" + "=" * 70, "cyan"))
