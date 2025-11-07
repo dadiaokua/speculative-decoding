@@ -105,29 +105,30 @@ class VLLMEngineManager:
             if self.config.max_num_batched_tokens is not None:
                 engine_args_dict["max_num_batched_tokens"] = self.config.max_num_batched_tokens
             
-            # 如果启用推测解码，添加推测解码参数
+            # 如果启用推测解码，使用 speculative_config 字典（vLLM v0.11.0+ 新格式）
             if self.config.enable_speculative and self.config.speculative_model:
-                engine_args_dict["speculative_model"] = self.config.speculative_model
-                engine_args_dict["num_speculative_tokens"] = self.config.num_speculative_tokens
-                engine_args_dict["use_v2_block_manager"] = self.config.use_v2_block_manager
+                engine_args_dict["speculative_config"] = {
+                    "model": self.config.speculative_model,  # drafter模型路径
+                    "num_speculative_tokens": self.config.num_speculative_tokens,
+                }
                 self.logger.info("🚀 正在启动vLLM引擎（推测解码模式）...")
             else:
                 self.logger.info("🚀 正在启动vLLM引擎（标准模式）...")
             
             engine_args = AsyncEngineArgs(**engine_args_dict)
             
-            self.logger.info(f"  Target模型: {engine_args.model}")
+            self.logger.info(f"  Target模型: {self.config.model_path}")
             if self.config.enable_speculative and self.config.speculative_model:
                 self.logger.info(f"  Drafter模型: {self.config.speculative_model}")
                 self.logger.info(f"  推测token数: {self.config.num_speculative_tokens}")
-                self.logger.info(f"  V2块管理器: {self.config.use_v2_block_manager}")
-            self.logger.info(f"  张量并行: {engine_args.tensor_parallel_size}")
-            self.logger.info(f"  显存利用率: {engine_args.gpu_memory_utilization}")
-            self.logger.info(f"  最大序列长度: {engine_args.max_model_len}")
-            self.logger.info(f"  最大并发数: {engine_args.max_num_seqs}")
+            self.logger.info(f"  张量并行: {self.config.tensor_parallel_size}")
+            self.logger.info(f"  显存利用率: {self.config.gpu_memory_utilization}")
+            self.logger.info(f"  最大序列长度: {self.config.max_model_len}")
+            self.logger.info(f"  最大并发数: {self.config.max_num_seqs}")
             if self.config.max_num_batched_tokens is not None:
                 self.logger.info(f"  批处理最大tokens: {self.config.max_num_batched_tokens}")
-            self.logger.info(f"  数据类型: {engine_args.dtype}")
+            self.logger.info(f"  数据类型: {self.config.dtype}")
+            self.logger.info(f"  Enforce Eager: True (禁用CUDA graphs)")
             
             # 创建引擎实例
             self.engine = AsyncLLMEngine.from_engine_args(engine_args)

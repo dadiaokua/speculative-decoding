@@ -196,7 +196,7 @@ export ENABLE_DEBUG="false"              # 是否启用调试输出
 
 # vLLM引擎参数（仅在INFERENCE_ENGINE="vllm"时生效）
 export VLLM_TENSOR_PARALLEL_SIZE=8       # 张量并行大小（通常等于GPU数量）
-export VLLM_GPU_MEMORY_UTILIZATION=0.9   # GPU显存利用率（0-1之间）
+export VLLM_GPU_MEMORY_UTILIZATION=0.85  # GPU显存利用率（推测解码需要额外显存）
 export VLLM_MAX_MODEL_LEN=4096           # 最大模型长度
 export VLLM_MAX_NUM_SEQS=128             # 最大并发序列数
 export VLLM_MAX_NUM_BATCHED_TOKENS=8192  # 批处理最大token数（可选，默认自动计算）
