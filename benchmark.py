@@ -748,7 +748,7 @@ class BenchmarkRunner:
         
         # Initialize results
         method_name = "speculative_vllm" if use_spec else "target_ar_vllm"
-        target_results = BenchmarkResults(method_name=method_name)
+        target_results = BenchmarkResults(method=method_name)
         
         # Start GPU monitoring
         gpu_monitor = None
