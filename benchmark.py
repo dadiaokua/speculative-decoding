@@ -753,7 +753,7 @@ class BenchmarkRunner:
         # Start GPU monitoring
         gpu_monitor = None
         gpu_monitor_results = None
-        if self.gpu_monitor_enabled:
+        if self.enable_gpu_monitor:
             gpu_ids = list(range(8))  # Monitor all 8 GPUs for vLLM
             gpu_monitor = GPUMonitor(
                 gpu_ids=gpu_ids,
