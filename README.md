@@ -59,7 +59,7 @@ vLLM is a high-performance inference engine that can provide 2-10x speedup over 
 pip install vllm
 ```
 
-See [vLLM Integration Guide](docs/VLLM_INTEGRATION.md) for detailed instructions.
+For detailed vLLM setup and configuration, see [vLLM Guide](docs/VLLM_GUIDE.md).
 
 ## Quick Start
 
@@ -79,7 +79,7 @@ TARGET_GPU_RATIO=6    # Target model uses 6 GPUs
 DRAFTER_GPU_RATIO=2   # Drafter model uses 2 GPUs
 ```
 
-For detailed GPU deployment information, see [GPU Deployment Guide](docs/GPU_DEPLOYMENT.md).
+Available strategies: `multi_gpu_ratio` (proportional split), `shared_all` (both on all GPUs), `separate` (different GPUs), `same` (single GPU), `auto`.
 
 ### 2. Choose Inference Engine
 
@@ -96,7 +96,6 @@ export VLLM_MAX_MODEL_LEN=4096           # Max model length
 export VLLM_MAX_NUM_SEQS=128             # Max concurrent sequences
 ```
 
-See [vLLM Integration Guide](docs/VLLM_INTEGRATION.md) for more details.
 
 ### 3. Configure Benchmark Parameters
 
@@ -168,42 +167,33 @@ The benchmark collects the following metrics:
 
 ```
 Speculative-Decoding/
-├── benchmark.py              # Main benchmark runner
-├── run_benchmark.sh          # Benchmark configuration and launch script
+├── benchmark.py              # Main entry point
+├── run_benchmark.sh          # Benchmark launcher (configure here)
 ├── engine/                   # Core engine modules
-│   ├── infer_engine.py      # Batch inference engine
-│   ├── metrics.py           # Performance metrics collection
-│   ├── gpu_monitor.py       # GPU power/performance monitoring
-│   ├── models.py            # Model loading utilities
-│   ├── dataset.py           # Dataset loading utilities
-│   └── batch_decode.py      # Batch tokenization utilities
+│   ├── benchmark_runner.py      # Transformers benchmark runner
+│   ├── vllm_benchmark.py        # vLLM benchmark runner
+│   ├── model_loader.py          # Model loading
+│   ├── benchmark_executor.py    # Execution logic
+│   ├── infer_engine.py          # Inference engine (spec decoding + AR)
+│   ├── vllm_engine.py           # vLLM engine manager
+│   ├── metrics.py               # Performance metrics
+│   ├── gpu_monitor.py           # GPU monitoring
+│   ├── dataset.py               # Dataset loading
+│   └── batch_decode.py          # Batch tokenization
 ├── sampling/                 # Decoding strategies
-│   ├── speculative_decoding.py
-│   ├── base_decoding.py
-│   └── ...
 ├── ngram_assisted/          # N-gram assisted decoding
-├── docs/                    # Documentation
-│   ├── GPU_DEPLOYMENT.md    # GPU deployment guide
-│   └── GPU_DEPLOYMENT_CN.md # GPU deployment guide (Chinese)
-└── sharegpt_gpt4/          # ShareGPT dataset
+└── sharegpt_gpt4/          # ShareGPT dataset (place your data here)
 ```
 
 ## GPU Deployment
 
-The project supports flexible GPU allocation strategies:
+The project supports flexible GPU allocation strategies configured in `run_benchmark.sh`:
 
-- **multi_gpu_ratio** (default): Proportional allocation across multiple GPUs
-- **separate**: Target and Drafter on different GPUs
-- **same**: Both models share the same GPU
+- **multi_gpu_ratio**: Proportional split (e.g., 6:2 = Target on GPUs 0-5, Drafter on GPUs 6-7)
+- **shared_all**: Both models use all GPUs (recommended for 32GB+ GPUs)
+- **separate**: Target on GPU 0, Drafter on GPU 1
+- **same**: Both models on GPU 0
 - **auto**: Automatic allocation by transformers
-
-For detailed information, see [GPU Deployment Guide](docs/GPU_DEPLOYMENT.md).
-
-Example: 8-GPU deployment with 6:2 ratio
-```
-Target model (8B):  GPUs 0-5 (layers auto-distributed)
-Drafter model (1.7B): GPUs 6-7 (layers auto-distributed)
-```
 
 ## Advanced Usage
 
